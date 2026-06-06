@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  dns-resolver:
+    build: .
+    container_name: dns-recursive-resolver
+    ports:
+      - "3000:3000"
+    volumes:
+      - dns-data:/app/data
+    environment:
+      - PORT=3000
+      - DB_PATH=/app/data/dns.db
+    restart: unless-stopped
+
+volumes:
+  dns-data:

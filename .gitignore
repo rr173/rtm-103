@@ -7,3 +7,9 @@ node_modules/
 # 训练记录
 训练记录.md
 *.xlsx
+
+# DNS数据
+data/
+*.db
+*.db-shm
+*.db-wal
