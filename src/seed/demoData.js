@@ -142,15 +142,15 @@ function seedDemoData() {
   db.addRecord(
     exampleZone.id,
     'mail.example.com',
-    'A',
-    '93.184.216.35',
+    'CNAME',
+    'smtp.example.com',
     3600
   );
   db.addRecord(
     exampleZone.id,
-    'mail.example.com',
-    'CNAME',
-    'mail.example.com',
+    'smtp.example.com',
+    'A',
+    '93.184.216.35',
     3600
   );
 
