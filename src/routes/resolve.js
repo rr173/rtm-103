@@ -1,6 +1,6 @@
 const express = require('express');
 
-function createResolveRouter(resolver) {
+function createResolveRouter(resolver, detector) {
   const router = express.Router();
 
   router.post('/resolve', async (req, res) => {
@@ -18,6 +18,19 @@ function createResolveRouter(resolver) {
       }
 
       const result = await resolver.resolve(name, queryType, !!dnssec);
+
+      if (detector) {
+        detector.recordQueryExtended({
+          name,
+          type: queryType,
+          resultCode: result.status,
+          hops: result.hops || 0,
+          answerSize: result.answer ? result.answer.length : 0,
+          cached: result.cached || false,
+          elapsedMs: result.elapsedMs || 0,
+        });
+      }
+
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message, status: 'SERVFAIL' });

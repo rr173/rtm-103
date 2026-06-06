@@ -91,6 +91,12 @@ function migrateSchema() {
   if (!tableExists('trust_anchor')) {
     initTrustAnchorTable();
   }
+  if (!tableExists('analysis_alerts')) {
+    initAnalysisAlertsTable();
+  }
+  if (!tableExists('analysis_thresholds')) {
+    initAnalysisThresholdsTable();
+  }
 }
 
 function initChangelogTable() {
@@ -134,6 +140,44 @@ function initTrustAnchorTable() {
   `);
 }
 
+function initAnalysisAlertsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS analysis_alerts (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      data TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      dismissed_at INTEGER
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_alerts_type ON analysis_alerts(type);');
+  db.run('CREATE INDEX IF NOT EXISTS idx_alerts_severity ON analysis_alerts(severity);');
+  db.run('CREATE INDEX IF NOT EXISTS idx_alerts_status ON analysis_alerts(status);');
+  db.run('CREATE INDEX IF NOT EXISTS idx_alerts_created ON analysis_alerts(created_at);');
+}
+
+function initAnalysisThresholdsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS analysis_thresholds (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      amplification_count INTEGER NOT NULL DEFAULT 20,
+      amplification_response_size INTEGER NOT NULL DEFAULT 3,
+      probe_nxdomain_ratio REAL NOT NULL DEFAULT 0.4,
+      probe_subdomain_count INTEGER NOT NULL DEFAULT 10,
+      tunnel_label_length INTEGER NOT NULL DEFAULT 30,
+      tunnel_entropy REAL NOT NULL DEFAULT 3.5
+    );
+  `);
+  const existing = queryOne('SELECT id FROM analysis_thresholds WHERE id = 1');
+  if (!existing) {
+    run(
+      'INSERT INTO analysis_thresholds (id, amplification_count, amplification_response_size, probe_nxdomain_ratio, probe_subdomain_count, tunnel_label_length, tunnel_entropy) VALUES (1, 20, 3, 0.4, 10, 30, 3.5)'
+    );
+  }
+}
+
 function initSchema() {
   db.run(`
     CREATE TABLE IF NOT EXISTS zones (
@@ -168,6 +212,8 @@ function initSchema() {
   initChangelogTable();
   initDnssecTable();
   initTrustAnchorTable();
+  initAnalysisAlertsTable();
+  initAnalysisThresholdsTable();
 }
 
 function beginTransaction() {
@@ -760,6 +806,169 @@ function findDsRecords(parentZoneId, childZoneName) {
   );
 }
 
+function createAlert(type, severity, data) {
+  const id = uuidv4();
+  const now = Date.now();
+  run(
+    'INSERT INTO analysis_alerts (id, type, severity, status, data, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    [id, type, severity, 'active', JSON.stringify(data), now]
+  );
+  saveDatabase();
+  return getAlertById(id);
+}
+
+function getAlertById(id) {
+  const row = queryOne('SELECT * FROM analysis_alerts WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    type: row.type,
+    severity: row.severity,
+    status: row.status,
+    data: JSON.parse(row.data),
+    createdAt: row.created_at,
+    dismissedAt: row.dismissed_at,
+  };
+}
+
+function listAlerts(filters = {}) {
+  let sql = 'SELECT * FROM analysis_alerts WHERE 1=1';
+  const params = [];
+
+  if (filters.type) {
+    sql += ' AND type = ?';
+    params.push(filters.type);
+  }
+  if (filters.severity) {
+    sql += ' AND severity = ?';
+    params.push(filters.severity);
+  }
+  if (filters.status) {
+    sql += ' AND status = ?';
+    params.push(filters.status);
+  }
+  if (filters.fromTime) {
+    sql += ' AND created_at >= ?';
+    params.push(filters.fromTime);
+  }
+  if (filters.toTime) {
+    sql += ' AND created_at <= ?';
+    params.push(filters.toTime);
+  }
+
+  sql += ' ORDER BY created_at DESC';
+
+  const rows = queryAll(sql, params);
+  return rows.map((row) => ({
+    id: row.id,
+    type: row.type,
+    severity: row.severity,
+    status: row.status,
+    data: JSON.parse(row.data),
+    createdAt: row.created_at,
+    dismissedAt: row.dismissed_at,
+  }));
+}
+
+function dismissAlert(id) {
+  const now = Date.now();
+  run(
+    "UPDATE analysis_alerts SET status = 'dismissed', dismissed_at = ? WHERE id = ?",
+    [now, id]
+  );
+  saveDatabase();
+  return getAlertById(id);
+}
+
+function getAlertSummary() {
+  const activeByType = queryAll(
+    "SELECT type, COUNT(*) as cnt FROM analysis_alerts WHERE status = 'active' GROUP BY type"
+  );
+  const activeBySeverity = queryAll(
+    "SELECT severity, COUNT(*) as cnt FROM analysis_alerts WHERE status = 'active' GROUP BY severity"
+  );
+  const last24h = Date.now() - 24 * 60 * 60 * 1000;
+  const newLast24h = queryOne(
+    'SELECT COUNT(*) as cnt FROM analysis_alerts WHERE created_at >= ?',
+    [last24h]
+  );
+
+  const hourAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const allRecent = queryAll(
+    'SELECT created_at FROM analysis_alerts WHERE created_at >= ? ORDER BY created_at',
+    [hourAgo]
+  );
+
+  const trend = {};
+  for (let i = 23; i >= 0; i--) {
+    const bucketStart = Date.now() - i * 60 * 60 * 1000;
+    const bucketEnd = bucketStart + 60 * 60 * 1000;
+    const hourKey = new Date(bucketStart).toISOString().slice(0, 13) + ':00:00';
+    trend[hourKey] = allRecent.filter(
+      (r) => r.created_at >= bucketStart && r.created_at < bucketEnd
+    ).length;
+  }
+
+  return {
+    activeByType: Object.fromEntries(activeByType.map((r) => [r.type, r.cnt])),
+    activeBySeverity: Object.fromEntries(activeBySeverity.map((r) => [r.severity, r.cnt])),
+    newLast24h: newLast24h ? newLast24h.cnt : 0,
+    trend,
+  };
+}
+
+function getThresholds() {
+  const row = queryOne('SELECT * FROM analysis_thresholds WHERE id = 1');
+  if (!row) return null;
+  return {
+    amplificationCount: row.amplification_count,
+    amplificationResponseSize: row.amplification_response_size,
+    probeNxdomainRatio: row.probe_nxdomain_ratio,
+    probeSubdomainCount: row.probe_subdomain_count,
+    tunnelLabelLength: row.tunnel_label_length,
+    tunnelEntropy: row.tunnel_entropy,
+  };
+}
+
+function updateThresholds(updates) {
+  const current = getThresholds() || {};
+  const fields = [];
+  const params = [];
+
+  if (updates.amplificationCount !== undefined) {
+    fields.push('amplification_count = ?');
+    params.push(updates.amplificationCount);
+  }
+  if (updates.amplificationResponseSize !== undefined) {
+    fields.push('amplification_response_size = ?');
+    params.push(updates.amplificationResponseSize);
+  }
+  if (updates.probeNxdomainRatio !== undefined) {
+    fields.push('probe_nxdomain_ratio = ?');
+    params.push(updates.probeNxdomainRatio);
+  }
+  if (updates.probeSubdomainCount !== undefined) {
+    fields.push('probe_subdomain_count = ?');
+    params.push(updates.probeSubdomainCount);
+  }
+  if (updates.tunnelLabelLength !== undefined) {
+    fields.push('tunnel_label_length = ?');
+    params.push(updates.tunnelLabelLength);
+  }
+  if (updates.tunnelEntropy !== undefined) {
+    fields.push('tunnel_entropy = ?');
+    params.push(updates.tunnelEntropy);
+  }
+
+  if (fields.length > 0) {
+    params.push(1);
+    run(`UPDATE analysis_thresholds SET ${fields.join(', ')} WHERE id = ?`, params);
+    saveDatabase();
+  }
+
+  return getThresholds();
+}
+
 module.exports = {
   initDatabase,
   createZone,
@@ -793,4 +1002,11 @@ module.exports = {
   findDsRecords,
   buildRrsigValue,
   hmacSign,
+  createAlert,
+  getAlertById,
+  listAlerts,
+  dismissAlert,
+  getAlertSummary,
+  getThresholds,
+  updateThresholds,
 };
