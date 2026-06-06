@@ -69,8 +69,16 @@ async function bootstrap() {
     console.log('║   GET    /api/zones                                             ║');
     console.log('║   POST   /api/zones                                             ║');
     console.log('║   GET    /api/zones/:zoneId                                     ║');
+    console.log('║   GET    /api/zones/:zoneId/soa                                 ║');
+    console.log('║   GET    /api/zones/:zoneId/changelog                           ║');
     console.log('║   GET    /api/zones/:zoneId/records                             ║');
     console.log('║   POST   /api/zones/:zoneId/records                             ║');
+    console.log('║   PUT    /api/zones/:zoneId/records/:recordId                   ║');
+    console.log('║   DELETE /api/zones/:zoneId/records/:recordId                   ║');
+    console.log('║   GET    /api/zones/:zoneId/transfer/full                       ║');
+    console.log('║   GET    /api/zones/:zoneId/transfer/incremental                ║');
+    console.log('║   POST   /api/zones/:zoneId/sync                                ║');
+    console.log('║   GET    /api/zones/:zoneId/sync/status                         ║');
     console.log('║   POST   /api/resolve                                           ║');
     console.log('║   GET    /api/cache                                             ║');
     console.log('║   DELETE /api/cache                                             ║');

@@ -54,6 +54,150 @@ router.get('/zones/:zoneId', (req, res) => {
   }
 });
 
+router.get('/zones/:zoneId/soa', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+    const soa = db.getZoneSoa(zone.id);
+    res.json(soa);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/zones/:zoneId/changelog', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+
+    const fromSerial = req.query.fromSerial !== undefined ? parseInt(req.query.fromSerial, 10) : null;
+    const toSerial = req.query.toSerial !== undefined ? parseInt(req.query.toSerial, 10) : null;
+
+    if (fromSerial !== null && isNaN(fromSerial)) {
+      return res.status(400).json({ error: 'fromSerial must be a valid integer' });
+    }
+    if (toSerial !== null && isNaN(toSerial)) {
+      return res.status(400).json({ error: 'toSerial must be a valid integer' });
+    }
+
+    const changelog = db.getChangelog(zone.id, fromSerial, toSerial);
+    res.json(changelog);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/zones/:zoneId/transfer/full', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+
+    const records = db.getRecordsByZoneForTransfer(zone.id);
+    res.json({
+      zone_name: zone.name,
+      serial: zone.serial,
+      records,
+      timestamp: Date.now(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/zones/:zoneId/transfer/incremental', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+
+    if (req.query.fromSerial === undefined) {
+      return res.status(400).json({ error: 'fromSerial query parameter is required' });
+    }
+
+    const fromSerial = parseInt(req.query.fromSerial, 10);
+    if (isNaN(fromSerial)) {
+      return res.status(400).json({ error: 'fromSerial must be a valid integer' });
+    }
+
+    const range = db.getChangelogRange(zone.id);
+    if (range && range.minSerial !== null && fromSerial < range.minSerial - 1) {
+      return res.status(409).json({ error: '序列号过旧,请使用全量传输' });
+    }
+
+    const changes = db.getChangelog(zone.id, fromSerial, zone.serial);
+
+    res.json({
+      zone_name: zone.name,
+      fromSerial,
+      toSerial: zone.serial,
+      changes,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/zones/:zoneId/sync', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+
+    const { currentSerial } = req.body;
+    if (currentSerial === undefined || currentSerial === null) {
+      return res.status(400).json({ error: 'currentSerial is required' });
+    }
+
+    const cs = parseInt(currentSerial, 10);
+    if (isNaN(cs)) {
+      return res.status(400).json({ error: 'currentSerial must be a valid integer' });
+    }
+
+    if (cs >= zone.serial) {
+      db.recordSync(zone.id, 'noop');
+      return res.json({ upToDate: true, syncType: 'none' });
+    }
+
+    const range = db.getChangelogRange(zone.id);
+    const canDoIncremental = range && range.minSerial !== null && cs >= range.minSerial - 1;
+
+    if (canDoIncremental) {
+      const changes = db.getChangelog(zone.id, cs, zone.serial);
+      db.recordSync(zone.id, 'incremental');
+      return res.json({
+        upToDate: false,
+        syncType: 'incremental',
+        zone_name: zone.name,
+        fromSerial: cs,
+        toSerial: zone.serial,
+        changes,
+      });
+    } else {
+      const records = db.getRecordsByZoneForTransfer(zone.id);
+      db.recordSync(zone.id, 'full');
+      return res.json({
+        upToDate: false,
+        syncType: 'full',
+        zone_name: zone.name,
+        serial: zone.serial,
+        records,
+        timestamp: Date.now(),
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/zones/:zoneId/sync/status', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+    const stats = db.getSyncStats(zone.id);
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/zones/:zoneId/records', (req, res) => {
   try {
     const zone = db.getZoneById(req.params.zoneId);
@@ -83,6 +227,61 @@ router.get('/zones/:zoneId/records', (req, res) => {
     if (!zone) return res.status(404).json({ error: 'Zone not found' });
     const records = db.getRecordsByZone(zone.id);
     res.json(records);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/zones/:zoneId/records/:recordId', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+
+    const record = db.getRecordById(req.params.recordId);
+    if (!record) return res.status(404).json({ error: 'Record not found' });
+
+    if (record.zone_id !== zone.id) {
+      return res.status(400).json({ error: 'Record does not belong to this zone' });
+    }
+
+    const updates = {};
+    if (req.body.value !== undefined) updates.value = req.body.value;
+    if (req.body.ttl !== undefined) {
+      const ttl = parseInt(req.body.ttl, 10);
+      if (isNaN(ttl) || ttl < 0) {
+        return res.status(400).json({ error: 'ttl must be a non-negative integer' });
+      }
+      updates.ttl = ttl;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'At least one of value or ttl must be provided' });
+    }
+
+    const updated = db.updateRecord(zone.id, record.id, updates);
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/zones/:zoneId/records/:recordId', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+
+    const record = db.getRecordById(req.params.recordId);
+    if (!record) return res.status(404).json({ error: 'Record not found' });
+
+    if (record.zone_id !== zone.id) {
+      return res.status(400).json({ error: 'Record does not belong to this zone' });
+    }
+
+    const deleted = db.deleteRecord(zone.id, record.id);
+    if (!deleted) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+    res.status(204).send();
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
