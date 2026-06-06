@@ -466,6 +466,11 @@ function recordSync(zoneId, syncType) {
       'UPDATE zones SET sync_total = sync_total + 1, sync_full = sync_full + 1, last_sync_at = ? WHERE id = ?',
       [now, zoneId]
     );
+  } else if (syncType === 'noop') {
+    run(
+      'UPDATE zones SET sync_total = sync_total + 1, last_sync_at = ? WHERE id = ?',
+      [now, zoneId]
+    );
   }
   saveDatabase();
 }
