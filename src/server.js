@@ -9,6 +9,7 @@ const { RecursiveResolver } = require('./resolver/recursiveResolver');
 const { seedDemoData } = require('./seed/demoData');
 const { AnalysisDetector } = require('./analysis/detector');
 const { EnforcementManager } = require('./enforcement/enforcementManager');
+const { DnsUdpServer } = require('./dns/dnsServer');
 
 const zonesRouter = require('./routes/zones');
 const createResolveRouter = require('./routes/resolve');
@@ -16,6 +17,7 @@ const createCacheRouter = require('./routes/cache');
 const createStatsRouter = require('./routes/stats');
 const createAnalysisRouter = require('./routes/analysis');
 const createEnforcementRouter = require('./routes/enforcement');
+const createProtocolRouter = require('./routes/protocol');
 
 const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) {
@@ -146,6 +148,7 @@ async function bootstrap() {
   const resolver = new RecursiveResolver(cacheManager, statsLogger);
   const detector = new AnalysisDetector(statsLogger);
   const enforcementManager = new EnforcementManager();
+  const dnsServer = new DnsUdpServer(resolver, enforcementManager);
 
   const app = express();
 
@@ -171,6 +174,7 @@ async function bootstrap() {
   app.use('/api', createStatsRouter(statsLogger));
   app.use('/api', createAnalysisRouter(detector));
   app.use('/api', createEnforcementRouter(enforcementManager));
+  app.use('/api', createProtocolRouter(dnsServer));
 
   app.use((err, _req, res, _next) => {
     console.error('Unhandled error:', err);
@@ -181,12 +185,15 @@ async function bootstrap() {
   seedAnalysisData(detector);
   seedEnforcementData();
 
+  await dnsServer.start();
+
   app.listen(PORT, () => {
     console.log('');
     console.log('╔════════════════════════════════════════════════════════════════╗');
     console.log('║   DNS Recursive Resolver Simulator                             ║');
     console.log('╠════════════════════════════════════════════════════════════════╣');
     console.log(`║   Server running on http://localhost:${PORT}                     ║`);
+    console.log(`║   DNS UDP listening on port ${dnsServer.port}                                 ║`);
     console.log('╠════════════════════════════════════════════════════════════════╣');
     console.log('║   API Endpoints:                                                ║');
     console.log('║   GET    /api/health                                            ║');
@@ -239,6 +246,10 @@ async function bootstrap() {
     console.log('║   POST   /api/analysis/alerts/:id/block                         ║');
     console.log('║   POST   /api/analysis/alerts/:id/ratelimit                     ║');
     console.log('║   GET    /api/enforcement/stats                                 ║');
+    console.log('║   DNS Protocol:                                                 ║');
+    console.log('║   GET    /api/protocol/stats                                    ║');
+    console.log('║   POST   /api/protocol/config  { port }                         ║');
+    console.log('║   dig @127.0.0.1 -p 5353 www.example.com A                      ║');
     console.log('╚════════════════════════════════════════════════════════════════╝');
     console.log('');
   });

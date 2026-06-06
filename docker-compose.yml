@@ -6,6 +6,7 @@ services:
     container_name: dns-recursive-resolver
     ports:
       - "3000:3000"
+      - "5353:5353/udp"
     volumes:
       - dns-data:/app/data
     environment:
