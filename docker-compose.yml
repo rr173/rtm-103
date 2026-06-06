@@ -13,5 +13,14 @@ services:
       - DB_PATH=/app/data/dns.db
     restart: unless-stopped
 
+  dns-frontend:
+    build: ./frontend
+    container_name: dns-visualizer-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - dns-resolver
+    restart: unless-stopped
+
 volumes:
   dns-data:
