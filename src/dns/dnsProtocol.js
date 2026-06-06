@@ -230,6 +230,12 @@ function encodeRdata(type, value) {
   }
 }
 
+function normalizeNameForCompare(name) {
+  let n = (name || '').toLowerCase();
+  if (n !== '.' && n.endsWith('.')) n = n.slice(0, -1);
+  return n;
+}
+
 function buildResponse({
   id,
   rd,
@@ -269,9 +275,15 @@ function buildResponse({
   parts.push(qdBuf);
 
   const questionOffset = 12;
+  const qnameNormalized = normalizeNameForCompare(question.name);
 
   for (const rr of [...answers, ...authority, ...additional]) {
-    parts.push(encodeCompressedPointer(questionOffset));
+    const rrNameNormalized = normalizeNameForCompare(rr.name);
+    if (rrNameNormalized === qnameNormalized) {
+      parts.push(encodeCompressedPointer(questionOffset));
+    } else {
+      parts.push(encodeDomainName(rr.name));
+    }
 
     const rrMeta = Buffer.alloc(8);
     rrMeta.writeUInt16BE(TYPE_TO_NUM[rr.type] || 1, 0);
@@ -300,6 +312,28 @@ function buildFormerrResponse(id) {
   return header;
 }
 
+function buildServfailResponse(id, rd, question) {
+  if (!question) {
+    const header = Buffer.alloc(12);
+    header.writeUInt16BE(id, 0);
+    header.writeUInt16BE(0x8000 | 0x0002, 2);
+    header.writeUInt16BE(0, 4);
+    header.writeUInt16BE(0, 6);
+    header.writeUInt16BE(0, 8);
+    header.writeUInt16BE(0, 10);
+    return header;
+  }
+  return buildResponse({
+    id,
+    rd,
+    question,
+    rcode: 2,
+    answers: [],
+    authority: [],
+    additional: [],
+  });
+}
+
 module.exports = {
   TYPE_MAP,
   TYPE_TO_NUM,
@@ -314,4 +348,5 @@ module.exports = {
   encodeRdata,
   buildResponse,
   buildFormerrResponse,
+  buildServfailResponse,
 };

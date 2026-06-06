@@ -3,6 +3,7 @@ const {
   parseDnsMessage,
   buildResponse,
   buildFormerrResponse,
+  buildServfailResponse,
   DnsParseError,
   RCODE_MAP,
   TYPE_MAP,
@@ -50,12 +51,24 @@ class DnsUdpServer {
 
   async setPortAndRestart(newPort) {
     const oldPort = this.port;
+    const oldSocket = this.socket;
     this.port = newPort;
     try {
       await this.stop();
     } catch (e) {}
-    await this.start();
-    return { oldPort, newPort: this.port };
+    try {
+      await this.start();
+      return { oldPort, newPort: this.port, restarted: true };
+    } catch (err) {
+      this.port = oldPort;
+      this.socket = oldSocket;
+      if (this.socket) {
+        try {
+          await this.start();
+        } catch (e2) {}
+      }
+      throw err;
+    }
   }
 
   start() {
@@ -101,9 +114,14 @@ class DnsUdpServer {
     this.stats.totalPackets += 1;
 
     let parsedId = 0;
+    let parsedRd = 0;
+    let parsedQuestion = null;
     try {
       if (msg.length >= 2) {
         parsedId = msg.readUInt16BE(0);
+      }
+      if (msg.length >= 4) {
+        parsedRd = (msg.readUInt16BE(2) >> 8) & 0x1;
       }
 
       const parsed = parseDnsMessage(msg);
@@ -113,6 +131,7 @@ class DnsUdpServer {
       }
 
       const question = parsed.questions[0];
+      parsedQuestion = question;
       const queryName = question.name;
       const queryType = question.type;
       const queryQtype = question.qtype;
@@ -179,7 +198,7 @@ class DnsUdpServer {
         console.log(`[DNS-UDP] FORMERR from ${rinfo.address}:${rinfo.port} - ${err.message}`);
       } else {
         this.stats.rcodeCounts[2] = (this.stats.rcodeCounts[2] || 0) + 1;
-        const resp = buildFormerrResponse(parsedId);
+        const resp = buildServfailResponse(parsedId, parsedRd, parsedQuestion);
         try {
           this.socket.send(resp, rinfo.port, rinfo.address);
         } catch (e) {}
