@@ -10,10 +10,15 @@ function createEnforcementRouter(enforcementManager) {
       if (!pattern) {
         return res.status(400).json({ error: 'pattern is required' });
       }
+      const rawExpire = expireMinutes ?? 0;
+      const em = parseInt(rawExpire, 10);
+      if (!Number.isFinite(em) || em < 0) {
+        return res.status(400).json({ error: 'expireMinutes must be a non-negative integer (0 for permanent)' });
+      }
       const entry = db.addBlocklistEntry(
         pattern,
         reason || null,
-        expireMinutes || 0
+        em
       );
       res.json(entry);
     } catch (err) {
@@ -171,7 +176,11 @@ function createEnforcementRouter(enforcementManager) {
       if (!domainPattern) {
         return res.status(400).json({ error: 'Cannot extract domain from alert' });
       }
-      const expireMinutes = req.body?.expireMinutes ?? 60;
+      const rawExpire = req.body?.expireMinutes ?? 60;
+      const expireMinutes = parseInt(rawExpire, 10);
+      if (!Number.isFinite(expireMinutes) || expireMinutes < 0) {
+        return res.status(400).json({ error: 'expireMinutes must be a non-negative integer (0 for permanent)' });
+      }
       const reason = req.body?.reason || `Blocked from alert ${alert.id} (${alert.type})`;
       const entry = db.addBlocklistEntry(domainPattern, reason, expireMinutes);
       res.json({ blocklist: entry, fromAlert: alert.id });
@@ -190,8 +199,16 @@ function createEnforcementRouter(enforcementManager) {
       if (!domainPattern) {
         return res.status(400).json({ error: 'Cannot extract domain from alert' });
       }
-      const maxRequests = req.body?.maxRequests ?? 5;
-      const windowSeconds = req.body?.windowSeconds ?? 60;
+      const rawMax = req.body?.maxRequests ?? 5;
+      const rawWindow = req.body?.windowSeconds ?? 60;
+      const maxRequests = parseInt(rawMax, 10);
+      const windowSeconds = parseInt(rawWindow, 10);
+      if (!Number.isFinite(maxRequests) || maxRequests <= 0) {
+        return res.status(400).json({ error: 'maxRequests must be a positive integer' });
+      }
+      if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) {
+        return res.status(400).json({ error: 'windowSeconds must be a positive integer' });
+      }
       const rule = db.addRatelimitRule(domainPattern, maxRequests, windowSeconds);
       res.json({ ratelimit: rule, fromAlert: alert.id });
     } catch (err) {

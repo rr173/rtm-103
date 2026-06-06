@@ -53,7 +53,7 @@ class EnforcementManager {
     if (p === d) return true;
     if (p.startsWith('*.')) {
       const suffix = p.slice(2);
-      return d.endsWith('.' + suffix) || d === suffix;
+      return d.endsWith('.' + suffix);
     }
     return false;
   }
@@ -89,40 +89,42 @@ class EnforcementManager {
   }
 
   recordIntercept(type, domain, pattern) {
+    const key = (domain || '').toLowerCase();
     if (type === 'block') {
       this.stats.blockCount += 1;
       this.stats.perDomainBlockCount.set(
-        domain,
-        (this.stats.perDomainBlockCount.get(domain) || 0) + 1
+        key,
+        (this.stats.perDomainBlockCount.get(key) || 0) + 1
       );
     } else if (type === 'ratelimit') {
       this.stats.rateLimitCount += 1;
       this.stats.perDomainRateLimitCount.set(
-        domain,
-        (this.stats.perDomainRateLimitCount.get(domain) || 0) + 1
+        key,
+        (this.stats.perDomainRateLimitCount.get(key) || 0) + 1
       );
     } else if (type === 'allow') {
       this.stats.allowCount += 1;
       this.stats.perDomainAllowCount.set(
-        domain,
-        (this.stats.perDomainAllowCount.get(domain) || 0) + 1
+        key,
+        (this.stats.perDomainAllowCount.get(key) || 0) + 1
       );
     }
     this.stats.recentIntercepts.push({
       type,
-      domain,
+      domain: key,
       pattern,
       timestamp: Date.now(),
     });
   }
 
   checkRatelimitAndRecord(domain, rule) {
+    const key = (domain || '').toLowerCase();
     const now = Date.now();
     const windowMs = rule.window_seconds * 1000;
-    let entry = this.rateLimitCounters.get(domain);
+    let entry = this.rateLimitCounters.get(key);
     if (!entry || entry.matchedPattern !== rule.pattern) {
       entry = { matchedPattern: rule.pattern, timestamps: [] };
-      this.rateLimitCounters.set(domain, entry);
+      this.rateLimitCounters.set(key, entry);
     }
     entry.timestamps = entry.timestamps.filter((t) => now - t < windowMs);
     if (entry.timestamps.length >= rule.max_requests) {
