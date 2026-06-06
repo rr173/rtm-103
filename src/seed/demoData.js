@@ -259,16 +259,78 @@ function seedDemoData() {
 
   console.log('[Seed] Demo data initialized successfully.');
   console.log('[Seed] Zones: ., com, net, org, example.com, mysite.com, provider.net');
+
+  setupDnssecChain();
+
   console.log('[Seed] Test queries:');
   console.log('  POST /api/resolve { "name": "www.example.com", "type": "A" }');
   console.log('  POST /api/resolve { "name": "cdn.example.com", "type": "A" }');
   console.log('  POST /api/resolve { "name": "mail.example.com", "type": "A" }');
+  console.log('[Seed] DNSSEC test queries:');
+  console.log('  POST /api/resolve { "name": "www.example.com", "type": "A", "dnssec": true }');
   console.log('[Seed] Sync tests:');
   console.log('  GET  /api/zones/:zoneId/soa');
   console.log('  GET  /api/zones/:zoneId/changelog');
   console.log('  GET  /api/zones/:zoneId/transfer/full');
   console.log('  GET  /api/zones/:zoneId/transfer/incremental?fromSerial=N');
   console.log('  POST /api/zones/:zoneId/sync');
+}
+
+function setupDnssecChain() {
+  const rootZone = db.getZoneByName('.');
+  const comZone = db.getZoneByName('com');
+  const exampleZone = db.getZoneByName('example.com');
+
+  if (!rootZone || !comZone || !exampleZone) {
+    console.log('[Seed-DNSSEC] Required zones not found, skipping DNSSEC setup.');
+    return;
+  }
+
+  const rootDnssec = db.getDnssecStatus(rootZone.id);
+  if (!rootDnssec.enabled) {
+    console.log('[Seed-DNSSEC] Enabling DNSSEC for root zone...');
+    db.enableDnssec(rootZone.id);
+  }
+
+  const comDnssec = db.getDnssecStatus(comZone.id);
+  if (!comDnssec.enabled) {
+    console.log('[Seed-DNSSEC] Enabling DNSSEC for com zone...');
+    db.enableDnssec(comZone.id);
+  }
+
+  const exampleDnssec = db.getDnssecStatus(exampleZone.id);
+  if (!exampleDnssec.enabled) {
+    console.log('[Seed-DNSSEC] Enabling DNSSEC for example.com zone...');
+    db.enableDnssec(exampleZone.id);
+  }
+
+  const rootStatus = db.getDnssecStatus(rootZone.id);
+  const comStatus = db.getDnssecStatus(comZone.id);
+  const exampleStatus = db.getDnssecStatus(exampleZone.id);
+
+  const trustAnchor = db.getTrustAnchor();
+  if (!trustAnchor || trustAnchor.key_tag !== rootStatus.keyTag) {
+    console.log('[Seed-DNSSEC] Setting trust anchor for root zone...');
+    db.setTrustAnchor(rootStatus.keyTag);
+  }
+
+  const existingRootDsForCom = db.findDsRecords(rootZone.id, 'com');
+  if (!existingRootDsForCom.some((ds) => ds.value === comStatus.keyTag)) {
+    console.log('[Seed-DNSSEC] Adding DS record for com in root zone...');
+    db.addRecord(rootZone.id, 'com', 'DS', comStatus.keyTag, 86400);
+  }
+
+  const existingComDsForExample = db.findDsRecords(comZone.id, 'example.com');
+  if (!existingComDsForExample.some((ds) => ds.value === exampleStatus.keyTag)) {
+    console.log('[Seed-DNSSEC] Adding DS record for example.com in com zone...');
+    db.addRecord(comZone.id, 'example.com', 'DS', exampleStatus.keyTag, 86400);
+  }
+
+  console.log('[Seed-DNSSEC] DNSSEC chain setup complete:');
+  console.log(`  Root (.): keyTag=${rootStatus.keyTag}`);
+  console.log(`  com:      keyTag=${comStatus.keyTag}`);
+  console.log(`  example.com: keyTag=${exampleStatus.keyTag}`);
+  console.log(`  Trust anchor set to root keyTag.`);
 }
 
 module.exports = { seedDemoData };

@@ -85,6 +85,13 @@ async function bootstrap() {
     console.log('║   DELETE /api/cache/:name                                       ║');
     console.log('║   GET    /api/stats                                             ║');
     console.log('║   GET    /api/logs?limit=50                                     ║');
+    console.log('║   DNSSEC:                                                       ║');
+    console.log('║   POST   /api/zones/:zoneId/dnssec/enable                       ║');
+    console.log('║   GET    /api/zones/:zoneId/dnssec                              ║');
+    console.log('║   DELETE /api/zones/:zoneId/dnssec/disable                      ║');
+    console.log('║   POST   /api/dnssec/trust-anchor                               ║');
+    console.log('║   GET    /api/dnssec/trust-anchor                               ║');
+    console.log('║   POST   /api/resolve  { ..., dnssec: true }                    ║');
     console.log('╚════════════════════════════════════════════════════════════════╝');
     console.log('');
   });

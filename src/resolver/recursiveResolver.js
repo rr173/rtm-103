@@ -1,6 +1,12 @@
 const db = require('../db/database');
 const { DEFAULT_NEGATIVE_TTL } = require('../cache/cacheManager');
 
+function normalizeZoneName(name) {
+  let n = name.toLowerCase();
+  if (n !== '.' && n.endsWith('.')) n = n.slice(0, -1);
+  return n;
+}
+
 const HOP_DELAY_MS = 2;
 const MAX_DELEGATION_HOPS = 12;
 const MAX_CNAME_DEPTH = 8;
@@ -36,7 +42,7 @@ class RecursiveResolver {
     this.stats = statsLogger;
   }
 
-  async resolve(name, type) {
+  async resolve(name, type, dnssec = false) {
     const startTime = Date.now();
     const targetName = normalizeName(name);
     const targetType = type.toUpperCase();
@@ -55,8 +61,9 @@ class RecursiveResolver {
         elapsedMs: elapsed,
       });
 
+      let response;
       if (isNxdomain) {
-        return {
+        response = {
           status: 'NXDOMAIN',
           answer: [],
           authority: cached.value.authority || [],
@@ -65,17 +72,24 @@ class RecursiveResolver {
           elapsedMs: elapsed,
           hops: 0,
         };
+      } else {
+        response = {
+          status: 'SUCCESS',
+          answer: cached.value.answer,
+          authority: cached.value.authority || [],
+          trace: cached.value.trace || [],
+          cached: true,
+          elapsedMs: elapsed,
+          hops: 0,
+        };
       }
 
-      return {
-        status: 'SUCCESS',
-        answer: cached.value.answer,
-        authority: cached.value.authority || [],
-        trace: cached.value.trace || [],
-        cached: true,
-        elapsedMs: elapsed,
-        hops: 0,
-      };
+      if (dnssec) {
+        const dnssecResult = this._validateDnssec(targetName, targetType, response.answer);
+        Object.assign(response, dnssecResult);
+      }
+
+      return response;
     }
 
     const state = {
@@ -116,7 +130,7 @@ class RecursiveResolver {
         elapsedMs: elapsed,
       });
 
-      return {
+      const response = {
         status: result.status,
         message: result.message,
         answer: result.answer || [],
@@ -126,6 +140,13 @@ class RecursiveResolver {
         elapsedMs: elapsed,
         hops: state.delegationHops,
       };
+
+      if (dnssec) {
+        const dnssecResult = this._validateDnssec(targetName, targetType, response.answer);
+        Object.assign(response, dnssecResult);
+      }
+
+      return response;
     } catch (err) {
       const elapsed = Date.now() - startTime;
       this.stats.recordQuery({
@@ -136,7 +157,7 @@ class RecursiveResolver {
         cached: false,
         elapsedMs: elapsed,
       });
-      return {
+      const response = {
         status: err.status || 'SERVFAIL',
         message: err.message,
         answer: [],
@@ -146,6 +167,11 @@ class RecursiveResolver {
         elapsedMs: elapsed,
         hops: state.delegationHops,
       };
+      if (dnssec) {
+        const dnssecResult = this._validateDnssec(targetName, targetType, response.answer);
+        Object.assign(response, dnssecResult);
+      }
+      return response;
     }
   }
 
@@ -340,6 +366,186 @@ class RecursiveResolver {
     if (parent === '.') return true;
     if (child === parent) return true;
     return child.endsWith('.' + parent);
+  }
+
+  _validateDnssec(qname, qtype, answers) {
+    const validationChain = [];
+    const trustAnchor = db.getTrustAnchor();
+
+    if (!trustAnchor) {
+      return {
+        dnssecStatus: 'BOGUS',
+        failureReason: 'No trust anchor configured for root zone',
+        failureAt: '.',
+        validationChain: [{ zone: '.', result: 'BOGUS', reason: 'Trust anchor not set' }],
+      };
+    }
+
+    if (!answers || answers.length === 0) {
+      return {
+        dnssecStatus: 'INSECURE',
+        validationChain: [{ zone: '.', result: 'INSECURE', reason: 'No answers to validate' }],
+      };
+    }
+
+    const firstAnswer = answers[0];
+    const recordZone = db.findBestMatchingZone(firstAnswer.name);
+    if (!recordZone) {
+      return {
+        dnssecStatus: 'BOGUS',
+        failureReason: 'No authoritative zone found for record',
+        failureAt: firstAnswer.name,
+        validationChain: [{ zone: firstAnswer.name, result: 'BOGUS', reason: 'No authoritative zone' }],
+      };
+    }
+
+    let currentZone = recordZone;
+    let allSecure = true;
+
+    while (currentZone) {
+      const zoneDnssec = db.getZoneDnssec(currentZone.id);
+
+      if (!zoneDnssec || !zoneDnssec.enabled) {
+        validationChain.push({
+          zone: currentZone.name,
+          result: 'INSECURE',
+          reason: 'DNSSEC not enabled for this zone',
+        });
+        allSecure = false;
+        break;
+      }
+
+      if (currentZone.id === recordZone.id) {
+        for (const answer of answers) {
+          if (answer.type === 'RRSIG') continue;
+          const rrsigs = db.findRrsigForRecord(recordZone.id, answer.name, answer.type);
+          if (!rrsigs || rrsigs.length === 0) {
+            validationChain.push({
+              zone: currentZone.name,
+              result: 'BOGUS',
+              reason: `No RRSIG found for ${answer.name} ${answer.type}`,
+            });
+            return {
+              dnssecStatus: 'BOGUS',
+              failureReason: `Missing RRSIG for ${answer.name} ${answer.type}`,
+              failureAt: currentZone.name,
+              validationChain,
+            };
+          }
+
+          let sigValid = false;
+          for (const rrsig of rrsigs) {
+            const parts = rrsig.value.split('/');
+            if (parts.length < 3) continue;
+            const [coveredType, sigKeyTag, signature] = parts;
+            if (coveredType !== answer.type) continue;
+            if (sigKeyTag !== zoneDnssec.key_tag) continue;
+            if (db.verifyRrsig(zoneDnssec.secret, answer.name, answer.type, answer.value, answer.ttl, signature)) {
+              sigValid = true;
+              break;
+            }
+          }
+
+          if (!sigValid) {
+            validationChain.push({
+              zone: currentZone.name,
+              result: 'BOGUS',
+              reason: `Invalid signature for ${answer.name} ${answer.type}`,
+            });
+            return {
+              dnssecStatus: 'BOGUS',
+              failureReason: `Invalid RRSIG signature for ${answer.name} ${answer.type}`,
+              failureAt: currentZone.name,
+              validationChain,
+            };
+          }
+        }
+        validationChain.push({
+          zone: currentZone.name,
+          result: 'SECURE',
+          reason: 'Record signatures verified',
+        });
+      } else {
+        validationChain.push({
+          zone: currentZone.name,
+          result: 'SECURE',
+          reason: 'Zone DNSSEC enabled',
+        });
+      }
+
+      if (currentZone.name === '.') {
+        if (zoneDnssec.key_tag !== trustAnchor.key_tag) {
+          validationChain[validationChain.length - 1].result = 'BOGUS';
+          validationChain[validationChain.length - 1].reason = `Root keyTag ${zoneDnssec.key_tag} does not match trust anchor ${trustAnchor.key_tag}`;
+          return {
+            dnssecStatus: 'BOGUS',
+            failureReason: `Root zone keyTag does not match configured trust anchor`,
+            failureAt: '.',
+            validationChain,
+          };
+        }
+        break;
+      }
+
+      const parentZone = db.getParentZone(currentZone.name);
+      if (!parentZone) {
+        validationChain.push({
+          zone: '(missing parent)',
+          result: 'BOGUS',
+          reason: `Parent zone of ${currentZone.name} not found`,
+        });
+        return {
+          dnssecStatus: 'BOGUS',
+          failureReason: `Parent zone not found for ${currentZone.name}`,
+          failureAt: currentZone.name,
+          validationChain,
+        };
+      }
+
+      const dsRecords = db.findDsRecords(parentZone.id, currentZone.name);
+      if (!dsRecords || dsRecords.length === 0) {
+        validationChain.push({
+          zone: parentZone.name,
+          result: 'BOGUS',
+          reason: `No DS record found for ${currentZone.name} in parent zone ${parentZone.name}`,
+        });
+        return {
+          dnssecStatus: 'BOGUS',
+          failureReason: `Missing DS record for ${currentZone.name} in parent zone`,
+          failureAt: parentZone.name,
+          validationChain,
+        };
+      }
+
+      const dsMatches = dsRecords.some((ds) => ds.value === zoneDnssec.key_tag);
+      if (!dsMatches) {
+        validationChain.push({
+          zone: parentZone.name,
+          result: 'BOGUS',
+          reason: `DS record for ${currentZone.name} does not match zone keyTag`,
+        });
+        return {
+          dnssecStatus: 'BOGUS',
+          failureReason: `DS record does not match zone keyTag for ${currentZone.name}`,
+          failureAt: parentZone.name,
+          validationChain,
+        };
+      }
+
+      currentZone = parentZone;
+    }
+
+    if (allSecure) {
+      return {
+        dnssecStatus: 'SECURE',
+        validationChain,
+      };
+    } else {
+      return {
+        dnssecStatus: 'INSECURE',
+        validationChain,
+      };
+    }
   }
 }
 

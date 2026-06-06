@@ -1,6 +1,7 @@
 const initSqlJs = require('sql.js');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 
 let SQL;
@@ -84,6 +85,12 @@ function migrateSchema() {
   if (!tableExists('zone_changelog')) {
     initChangelogTable();
   }
+  if (!tableExists('zone_dnssec')) {
+    initDnssecTable();
+  }
+  if (!tableExists('trust_anchor')) {
+    initTrustAnchorTable();
+  }
 }
 
 function initChangelogTable() {
@@ -101,6 +108,30 @@ function initChangelogTable() {
   db.run(
     'CREATE INDEX IF NOT EXISTS idx_changelog_zone_serial ON zone_changelog(zone_id, serial);'
   );
+}
+
+function initDnssecTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS zone_dnssec (
+      zone_id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      key_tag TEXT NOT NULL,
+      algorithm TEXT NOT NULL,
+      secret TEXT NOT NULL,
+      enabled_at INTEGER,
+      FOREIGN KEY (zone_id) REFERENCES zones(id)
+    );
+  `);
+}
+
+function initTrustAnchorTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS trust_anchor (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      key_tag TEXT NOT NULL,
+      set_at INTEGER NOT NULL
+    );
+  `);
 }
 
 function initSchema() {
@@ -135,6 +166,8 @@ function initSchema() {
   );
   db.run('CREATE INDEX IF NOT EXISTS idx_zones_parent ON zones(parent_id);');
   initChangelogTable();
+  initDnssecTable();
+  initTrustAnchorTable();
 }
 
 function beginTransaction() {
@@ -287,6 +320,14 @@ function addRecord(zoneId, name, type, value, ttl) {
       [id, zoneId, name, type, value, ttl, now]
     );
 
+    if (type !== 'RRSIG') {
+      const dnssec = getZoneDnssec(zoneId);
+      if (dnssec && dnssec.enabled) {
+        const newRecord = { id, zone_id: zoneId, name, type, value, ttl };
+        generateRrsigForRecord(zoneId, newRecord, dnssec);
+      }
+    }
+
     const newSerial = incrementZoneSerial(zoneId, now);
 
     const newRecord = { id, zone_id: zoneId, name, type, value, ttl };
@@ -327,6 +368,19 @@ function updateRecord(zoneId, recordId, updates) {
       recordId,
     ]);
 
+    if (oldRecord.type !== 'RRSIG') {
+      const dnssec = getZoneDnssec(zoneId);
+      const newRecord = {
+        id: oldRecord.id,
+        zone_id: oldRecord.zone_id,
+        name: oldRecord.name,
+        type: oldRecord.type,
+        value: newValue,
+        ttl: newTtl,
+      };
+      regenerateRrsigForRecord(zoneId, oldRecord.name, oldRecord.type, newRecord, dnssec);
+    }
+
     const newSerial = incrementZoneSerial(zoneId, now);
 
     const newRecord = {
@@ -366,6 +420,10 @@ function deleteRecord(zoneId, recordId) {
     }
 
     run('DELETE FROM records WHERE id = ?', [recordId]);
+
+    if (oldRecord.type !== 'RRSIG') {
+      removeRrsigForRecord(zoneId, oldRecord.name, oldRecord.type);
+    }
 
     const newSerial = incrementZoneSerial(zoneId, now);
 
@@ -532,6 +590,176 @@ function findBestMatchingZone(domainName) {
   return getZoneByName('.');
 }
 
+function generateKeyTag() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+function generateSecret() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function hmacSign(secret, data) {
+  return crypto.createHmac('sha256', secret).update(data).digest('hex').slice(0, 16);
+}
+
+function buildRrsigValue(coveredType, keyTag, secret, name, value, ttl) {
+  const signature = hmacSign(secret, `${name}${coveredType}${value}${ttl}`);
+  return `${coveredType}/${keyTag}/${signature}`;
+}
+
+function verifyRrsig(secret, name, type, value, ttl, signaturePart) {
+  const expected = hmacSign(secret, `${name}${type}${value}${ttl}`);
+  return expected === signaturePart;
+}
+
+function getZoneDnssec(zoneId) {
+  return queryOne('SELECT * FROM zone_dnssec WHERE zone_id = ?', [zoneId]);
+}
+
+function getDnssecStatus(zoneId) {
+  const dnssec = getZoneDnssec(zoneId);
+  if (!dnssec || !dnssec.enabled) {
+    return { enabled: false };
+  }
+  return {
+    enabled: true,
+    keyTag: dnssec.key_tag,
+    algorithm: dnssec.algorithm,
+    enabledAt: dnssec.enabled_at,
+  };
+}
+
+function enableDnssec(zoneId) {
+  const now = Date.now();
+  const keyTag = generateKeyTag();
+  const algorithm = 'HMAC-SHA256';
+  const secret = generateSecret();
+
+  beginTransaction();
+  try {
+    const existing = getZoneDnssec(zoneId);
+    if (existing) {
+      run(
+        'UPDATE zone_dnssec SET enabled = 1, key_tag = ?, algorithm = ?, secret = ?, enabled_at = ? WHERE zone_id = ?',
+        [keyTag, algorithm, secret, now, zoneId]
+      );
+    } else {
+      run(
+        'INSERT INTO zone_dnssec (zone_id, enabled, key_tag, algorithm, secret, enabled_at) VALUES (?, 1, ?, ?, ?, ?)',
+        [zoneId, keyTag, algorithm, secret, now]
+      );
+    }
+
+    const records = queryAll(
+      "SELECT id, name, type, value, ttl FROM records WHERE zone_id = ? AND type != 'RRSIG'",
+      [zoneId]
+    );
+
+    for (const rec of records) {
+      const rrsigValue = buildRrsigValue(rec.type, keyTag, secret, rec.name, rec.value, rec.ttl);
+      const rrsigId = uuidv4();
+      run(
+        'INSERT INTO records (id, zone_id, name, type, value, ttl, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [rrsigId, zoneId, rec.name, 'RRSIG', rrsigValue, rec.ttl, now]
+      );
+    }
+
+    commitTransaction();
+  } catch (err) {
+    rollbackTransaction();
+    throw err;
+  }
+
+  saveDatabase();
+  return {
+    enabled: true,
+    keyTag,
+    algorithm,
+    enabledAt: now,
+  };
+}
+
+function disableDnssec(zoneId) {
+  beginTransaction();
+  try {
+    run('DELETE FROM zone_dnssec WHERE zone_id = ?', [zoneId]);
+    run("DELETE FROM records WHERE zone_id = ? AND type = 'RRSIG'", [zoneId]);
+    commitTransaction();
+  } catch (err) {
+    rollbackTransaction();
+    throw err;
+  }
+  saveDatabase();
+  return true;
+}
+
+function getTrustAnchor() {
+  return queryOne('SELECT key_tag, set_at FROM trust_anchor WHERE id = 1');
+}
+
+function setTrustAnchor(keyTag) {
+  const now = Date.now();
+  const existing = queryOne('SELECT id FROM trust_anchor WHERE id = 1');
+  if (existing) {
+    run('UPDATE trust_anchor SET key_tag = ?, set_at = ? WHERE id = 1', [keyTag, now]);
+  } else {
+    run('INSERT INTO trust_anchor (id, key_tag, set_at) VALUES (1, ?, ?)', [keyTag, now]);
+  }
+  saveDatabase();
+  return { keyTag, setAt: now };
+}
+
+function generateRrsigForRecord(zoneId, record, dnssec) {
+  if (!dnssec || !dnssec.enabled) return;
+  const rrsigValue = buildRrsigValue(
+    record.type,
+    dnssec.key_tag,
+    dnssec.secret,
+    record.name,
+    record.value,
+    record.ttl
+  );
+  const rrsigId = uuidv4();
+  const now = Date.now();
+  run(
+    'INSERT INTO records (id, zone_id, name, type, value, ttl, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [rrsigId, zoneId, record.name, 'RRSIG', rrsigValue, record.ttl, now]
+  );
+}
+
+function removeRrsigForRecord(zoneId, name, type) {
+  const sigPrefix = `${type}/`;
+  const rrsigs = queryAll(
+    "SELECT id FROM records WHERE zone_id = ? AND type = 'RRSIG' AND name = ? AND value LIKE ?",
+    [zoneId, name, `${sigPrefix}%`]
+  );
+  for (const r of rrsigs) {
+    run('DELETE FROM records WHERE id = ?', [r.id]);
+  }
+}
+
+function regenerateRrsigForRecord(zoneId, oldName, oldType, newRecord, dnssec) {
+  removeRrsigForRecord(zoneId, oldName, oldType);
+  if (dnssec && dnssec.enabled) {
+    generateRrsigForRecord(zoneId, newRecord, dnssec);
+  }
+}
+
+function findRrsigForRecord(zoneId, name, type) {
+  const sigPrefix = `${type}/`;
+  return queryAll(
+    "SELECT id, name, type, value, ttl FROM records WHERE zone_id = ? AND type = 'RRSIG' AND name = ? AND value LIKE ?",
+    [zoneId, name, `${sigPrefix}%`]
+  );
+}
+
+function findDsRecords(parentZoneId, childZoneName) {
+  return queryAll(
+    "SELECT id, name, type, value, ttl FROM records WHERE zone_id = ? AND type = 'DS' AND name = ?",
+    [parentZoneId, childZoneName]
+  );
+}
+
 module.exports = {
   initDatabase,
   createZone,
@@ -554,4 +782,15 @@ module.exports = {
   findDelegationNs,
   getParentZone,
   findBestMatchingZone,
+  getDnssecStatus,
+  enableDnssec,
+  disableDnssec,
+  getTrustAnchor,
+  setTrustAnchor,
+  getZoneDnssec,
+  verifyRrsig,
+  findRrsigForRecord,
+  findDsRecords,
+  buildRrsigValue,
+  hmacSign,
 };

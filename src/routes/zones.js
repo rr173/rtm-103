@@ -209,7 +209,7 @@ router.post('/zones/:zoneId/records', (req, res) => {
       return res.status(400).json({ error: 'name, type, and value are required' });
     }
 
-    const validTypes = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'SRV', 'PTR'];
+    const validTypes = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'SRV', 'PTR', 'DS'];
     if (!validTypes.includes(type.toUpperCase())) {
       return res.status(400).json({ error: `Invalid record type. Must be one of: ${validTypes.join(', ')}` });
     }
@@ -282,6 +282,67 @@ router.delete('/zones/:zoneId/records/:recordId', (req, res) => {
       return res.status(404).json({ error: 'Record not found' });
     }
     res.status(204).send();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/zones/:zoneId/dnssec/enable', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+
+    const result = db.enableDnssec(zone.id);
+    res.status(200).json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/zones/:zoneId/dnssec', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+
+    const status = db.getDnssecStatus(zone.id);
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/zones/:zoneId/dnssec/disable', (req, res) => {
+  try {
+    const zone = db.getZoneById(req.params.zoneId);
+    if (!zone) return res.status(404).json({ error: 'Zone not found' });
+
+    db.disableDnssec(zone.id);
+    res.status(204).send();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/dnssec/trust-anchor', (req, res) => {
+  try {
+    const { keyTag } = req.body;
+    if (!keyTag) {
+      return res.status(400).json({ error: 'keyTag is required' });
+    }
+    const result = db.setTrustAnchor(String(keyTag));
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/dnssec/trust-anchor', (_req, res) => {
+  try {
+    const anchor = db.getTrustAnchor();
+    if (!anchor) {
+      return res.json({ set: false });
+    }
+    res.json({ set: true, keyTag: anchor.key_tag, setAt: anchor.set_at });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

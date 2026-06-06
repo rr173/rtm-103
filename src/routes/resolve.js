@@ -5,7 +5,7 @@ function createResolveRouter(resolver) {
 
   router.post('/resolve', async (req, res) => {
     try {
-      const { name, type } = req.body;
+      const { name, type, dnssec } = req.body;
 
       if (!name) {
         return res.status(400).json({ error: 'name is required' });
@@ -17,7 +17,7 @@ function createResolveRouter(resolver) {
         return res.status(400).json({ error: `Invalid type. Must be one of: ${validTypes.join(', ')}` });
       }
 
-      const result = await resolver.resolve(name, queryType);
+      const result = await resolver.resolve(name, queryType, !!dnssec);
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message, status: 'SERVFAIL' });
