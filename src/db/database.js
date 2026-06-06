@@ -97,6 +97,15 @@ function migrateSchema() {
   if (!tableExists('analysis_thresholds')) {
     initAnalysisThresholdsTable();
   }
+  if (!tableExists('blocklist')) {
+    initBlocklistTable();
+  }
+  if (!tableExists('allowlist')) {
+    initAllowlistTable();
+  }
+  if (!tableExists('ratelimit_rules')) {
+    initRatelimitRulesTable();
+  }
 }
 
 function initChangelogTable() {
@@ -178,6 +187,136 @@ function initAnalysisThresholdsTable() {
   }
 }
 
+function initBlocklistTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS blocklist (
+      id TEXT PRIMARY KEY,
+      pattern TEXT NOT NULL,
+      reason TEXT,
+      expire_minutes INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_blocklist_pattern ON blocklist(pattern);');
+}
+
+function initAllowlistTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS allowlist (
+      id TEXT PRIMARY KEY,
+      pattern TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_allowlist_pattern ON allowlist(pattern);');
+}
+
+function initRatelimitRulesTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS ratelimit_rules (
+      id TEXT PRIMARY KEY,
+      pattern TEXT NOT NULL,
+      max_requests INTEGER NOT NULL,
+      window_seconds INTEGER NOT NULL DEFAULT 60,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_ratelimit_pattern ON ratelimit_rules(pattern);');
+}
+
+function addBlocklistEntry(pattern, reason, expireMinutes) {
+  const id = uuidv4();
+  const now = Date.now();
+  run(
+    'INSERT INTO blocklist (id, pattern, reason, expire_minutes, created_at) VALUES (?, ?, ?, ?, ?)',
+    [id, pattern, reason || null, expireMinutes || 0, now]
+  );
+  saveDatabase();
+  return getBlocklistEntryById(id);
+}
+
+function getBlocklistEntryById(id) {
+  return queryOne('SELECT * FROM blocklist WHERE id = ?', [id]);
+}
+
+function listBlocklistEntries(includeExpired = false) {
+  const rows = queryAll('SELECT * FROM blocklist ORDER BY created_at DESC');
+  const now = Date.now();
+  return rows.filter((row) => {
+    if (includeExpired) return true;
+    if (row.expire_minutes === 0) return true;
+    const expireAt = row.created_at + row.expire_minutes * 60 * 1000;
+    return expireAt > now;
+  });
+}
+
+function deleteBlocklistEntry(id) {
+  run('DELETE FROM blocklist WHERE id = ?', [id]);
+  saveDatabase();
+}
+
+function addAllowlistEntry(pattern) {
+  const id = uuidv4();
+  const now = Date.now();
+  run(
+    'INSERT INTO allowlist (id, pattern, created_at) VALUES (?, ?, ?)',
+    [id, pattern, now]
+  );
+  saveDatabase();
+  return getAllowlistEntryById(id);
+}
+
+function getAllowlistEntryById(id) {
+  return queryOne('SELECT * FROM allowlist WHERE id = ?', [id]);
+}
+
+function listAllowlistEntries() {
+  return queryAll('SELECT * FROM allowlist ORDER BY created_at DESC');
+}
+
+function deleteAllowlistEntry(id) {
+  run('DELETE FROM allowlist WHERE id = ?', [id]);
+  saveDatabase();
+}
+
+function addRatelimitRule(pattern, maxRequests, windowSeconds = 60) {
+  const id = uuidv4();
+  const now = Date.now();
+  run(
+    'INSERT INTO ratelimit_rules (id, pattern, max_requests, window_seconds, created_at) VALUES (?, ?, ?, ?, ?)',
+    [id, pattern, maxRequests, windowSeconds, now]
+  );
+  saveDatabase();
+  return getRatelimitRuleById(id);
+}
+
+function getRatelimitRuleById(id) {
+  return queryOne('SELECT * FROM ratelimit_rules WHERE id = ?', [id]);
+}
+
+function listRatelimitRules() {
+  return queryAll('SELECT * FROM ratelimit_rules ORDER BY created_at DESC');
+}
+
+function updateRatelimitRule(id, updates) {
+  const current = getRatelimitRuleById(id);
+  if (!current) return null;
+  const maxRequests = updates.maxRequests !== undefined ? updates.maxRequests : current.max_requests;
+  const windowSeconds = updates.windowSeconds !== undefined ? updates.windowSeconds : current.window_seconds;
+  const pattern = updates.pattern !== undefined ? updates.pattern : current.pattern;
+  run(
+    'UPDATE ratelimit_rules SET pattern = ?, max_requests = ?, window_seconds = ? WHERE id = ?',
+    [pattern, maxRequests, windowSeconds, id]
+  );
+  saveDatabase();
+  return getRatelimitRuleById(id);
+}
+
+function deleteRatelimitRule(id) {
+  run('DELETE FROM ratelimit_rules WHERE id = ?', [id]);
+  saveDatabase();
+}
+
 function initSchema() {
   db.run(`
     CREATE TABLE IF NOT EXISTS zones (
@@ -214,6 +353,9 @@ function initSchema() {
   initTrustAnchorTable();
   initAnalysisAlertsTable();
   initAnalysisThresholdsTable();
+  initBlocklistTable();
+  initAllowlistTable();
+  initRatelimitRulesTable();
 }
 
 function beginTransaction() {
@@ -1009,4 +1151,17 @@ module.exports = {
   getAlertSummary,
   getThresholds,
   updateThresholds,
+  addBlocklistEntry,
+  getBlocklistEntryById,
+  listBlocklistEntries,
+  deleteBlocklistEntry,
+  addAllowlistEntry,
+  getAllowlistEntryById,
+  listAllowlistEntries,
+  deleteAllowlistEntry,
+  addRatelimitRule,
+  getRatelimitRuleById,
+  listRatelimitRules,
+  updateRatelimitRule,
+  deleteRatelimitRule,
 };

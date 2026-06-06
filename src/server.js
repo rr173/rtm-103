@@ -8,12 +8,14 @@ const { StatsLogger } = require('./stats/statsLogger');
 const { RecursiveResolver } = require('./resolver/recursiveResolver');
 const { seedDemoData } = require('./seed/demoData');
 const { AnalysisDetector } = require('./analysis/detector');
+const { EnforcementManager } = require('./enforcement/enforcementManager');
 
 const zonesRouter = require('./routes/zones');
 const createResolveRouter = require('./routes/resolve');
 const createCacheRouter = require('./routes/cache');
 const createStatsRouter = require('./routes/stats');
 const createAnalysisRouter = require('./routes/analysis');
+const createEnforcementRouter = require('./routes/enforcement');
 
 const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) {
@@ -104,6 +106,38 @@ function seedAnalysisData(detector) {
   console.log('[Seed] Analysis test data injected: 10 normal + 25 amplification + 30 probe NXDOMAIN + 5 tunnel');
 }
 
+function seedEnforcementData() {
+  console.log('[Seed] Injecting enforcement default rules...');
+
+  const existingBlocklist = db.listBlocklistEntries(true);
+  const blocklistPatterns = new Set(existingBlocklist.map((e) => e.pattern));
+
+  if (!blocklistPatterns.has('*.evil.com')) {
+    db.addBlocklistEntry('*.evil.com', 'Known malicious domain pattern', 0);
+  }
+  if (!blocklistPatterns.has('amp-target.example.com')) {
+    db.addBlocklistEntry(
+      'amp-target.example.com',
+      'Amplification attack target',
+      60
+    );
+  }
+
+  const existingAllowlist = db.listAllowlistEntries();
+  const allowlistPatterns = new Set(existingAllowlist.map((e) => e.pattern));
+  if (!allowlistPatterns.has('www.example.com')) {
+    db.addAllowlistEntry('www.example.com');
+  }
+
+  const existingRatelimit = db.listRatelimitRules();
+  const ratelimitPatterns = new Set(existingRatelimit.map((r) => r.pattern));
+  if (!ratelimitPatterns.has('*.example.com')) {
+    db.addRatelimitRule('*.example.com', 30, 60);
+  }
+
+  console.log('[Seed] Enforcement defaults injected.');
+}
+
 async function bootstrap() {
   await db.initDatabase();
 
@@ -111,6 +145,7 @@ async function bootstrap() {
   const statsLogger = new StatsLogger();
   const resolver = new RecursiveResolver(cacheManager, statsLogger);
   const detector = new AnalysisDetector(statsLogger);
+  const enforcementManager = new EnforcementManager();
 
   const app = express();
 
@@ -131,10 +166,11 @@ async function bootstrap() {
   });
 
   app.use('/api', zonesRouter);
-  app.use('/api', createResolveRouter(resolver, detector));
+  app.use('/api', createResolveRouter(resolver, detector, enforcementManager));
   app.use('/api', createCacheRouter(cacheManager));
   app.use('/api', createStatsRouter(statsLogger));
   app.use('/api', createAnalysisRouter(detector));
+  app.use('/api', createEnforcementRouter(enforcementManager));
 
   app.use((err, _req, res, _next) => {
     console.error('Unhandled error:', err);
@@ -143,6 +179,7 @@ async function bootstrap() {
 
   seedDemoData();
   seedAnalysisData(detector);
+  seedEnforcementData();
 
   app.listen(PORT, () => {
     console.log('');
@@ -188,6 +225,20 @@ async function bootstrap() {
     console.log('║   POST   /api/dnssec/trust-anchor                               ║');
     console.log('║   GET    /api/dnssec/trust-anchor                               ║');
     console.log('║   POST   /api/resolve  { ..., dnssec: true }                    ║');
+    console.log('║   Enforcement:                                                  ║');
+    console.log('║   POST   /api/blocklist                                         ║');
+    console.log('║   GET    /api/blocklist                                         ║');
+    console.log('║   DELETE /api/blocklist/:id                                     ║');
+    console.log('║   POST   /api/allowlist                                         ║');
+    console.log('║   GET    /api/allowlist                                         ║');
+    console.log('║   DELETE /api/allowlist/:id                                     ║');
+    console.log('║   POST   /api/ratelimit                                         ║');
+    console.log('║   GET    /api/ratelimit                                         ║');
+    console.log('║   PUT    /api/ratelimit/:id                                     ║');
+    console.log('║   DELETE /api/ratelimit/:id                                     ║');
+    console.log('║   POST   /api/analysis/alerts/:id/block                         ║');
+    console.log('║   POST   /api/analysis/alerts/:id/ratelimit                     ║');
+    console.log('║   GET    /api/enforcement/stats                                 ║');
     console.log('╚════════════════════════════════════════════════════════════════╝');
     console.log('');
   });
