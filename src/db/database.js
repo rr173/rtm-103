@@ -395,6 +395,53 @@ function deleteSavedScript(id) {
   saveDatabase();
 }
 
+const EXECUTION_CODE_MAX_CHARS = 300;
+const EXECUTION_LOG_MAX_CHARS = 80;
+const EXECUTION_LOG_MAX_LINES = 20;
+
+const SENSITIVE_PATTERNS = [
+  [/sk-[a-zA-Z0-9_-]{10,}/g, 'sk-[REDACTED]'],
+  [/pk-[a-zA-Z0-9_-]{10,}/g, 'pk-[REDACTED]'],
+  [/(?:api[_-]?key|apikey)\s*[:=]\s*['"][^'"]{4,}['"]/gi, 'apiKey="[REDACTED]"'],
+  [/(?:password|passwd|pwd)\s*[:=]\s*['"][^'"]{2,}['"]/gi, 'password="[REDACTED]"'],
+  [/(?:secret|token)\s*[:=]\s*['"][^'"]{4,}['"]/gi, 'secret="[REDACTED]"'],
+  [/(?:private[_-]?key)\s*[:=]\s*['"][^'"]{8,}['"]/gi, 'privateKey="[REDACTED]"'],
+  [/(?:access[_-]?token|auth[_-]?token|bearer)\s*[:=]\s*['"][^'"]{8,}['"]/gi, 'accessToken="[REDACTED]"'],
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED PRIVATE KEY]'],
+  [/[0-9a-fA-F]{32,}/g, (m) => m.length >= 64 ? '[REDACTED_HASH]' : m],
+];
+
+function redactSensitiveContent(text) {
+  if (!text || typeof text !== 'string') return text;
+  let out = text;
+  for (const [pattern, replacement] of SENSITIVE_PATTERNS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
+function redactCodeForHistory(code) {
+  if (!code || typeof code !== 'string') return '';
+  const clean = redactSensitiveContent(code.replace(/\r\n/g, '\n'));
+  if (clean.length <= EXECUTION_CODE_MAX_CHARS) return clean;
+  const head = clean.slice(0, Math.floor(EXECUTION_CODE_MAX_CHARS * 0.7));
+  const tail = clean.slice(-Math.floor(EXECUTION_CODE_MAX_CHARS * 0.2));
+  return head +
+    `\n\n... [truncated, total ${clean.length} chars, omitted ${clean.length - head.length - tail.length} chars in between] ...\n\n` +
+    tail;
+}
+
+function redactLogsForHistory(logs) {
+  if (!Array.isArray(logs)) return [];
+  const trimmed = logs.slice(0, EXECUTION_LOG_MAX_LINES);
+  return trimmed.map((line) => {
+    const str = typeof line !== 'string' ? String(line) : line;
+    const redacted = redactSensitiveContent(str);
+    if (redacted.length <= EXECUTION_LOG_MAX_CHARS) return redacted;
+    return redacted.slice(0, EXECUTION_LOG_MAX_CHARS) + '... [truncated]';
+  });
+}
+
 function recordExecution(execution) {
   const id = execution.id || uuidv4();
   run(
@@ -403,11 +450,11 @@ function recordExecution(execution) {
       id,
       execution.scriptName || null,
       execution.scriptId || null,
-      execution.code,
+      redactCodeForHistory(execution.code),
       execution.success ? 1 : 0,
       execution.result !== undefined ? JSON.stringify(execution.result) : null,
       execution.error ? JSON.stringify(execution.error) : null,
-      execution.logs ? JSON.stringify(execution.logs) : null,
+      execution.logs ? JSON.stringify(redactLogsForHistory(execution.logs)) : null,
       execution.durationMs,
       execution.startedAt,
       execution.finishedAt,
@@ -424,11 +471,11 @@ function getExecutionById(id) {
     id: row.id,
     scriptName: row.script_name,
     scriptId: row.script_id,
-    code: row.code,
+    code: redactCodeForHistory(row.code),
     success: row.success === 1,
     result: row.result ? JSON.parse(row.result) : null,
     error: row.error ? JSON.parse(row.error) : null,
-    logs: row.logs ? JSON.parse(row.logs) : [],
+    logs: redactLogsForHistory(row.logs ? JSON.parse(row.logs) : []),
     durationMs: row.duration_ms,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -449,11 +496,11 @@ function listExecutions(limit = 50, scriptId = null) {
     id: row.id,
     scriptName: row.script_name,
     scriptId: row.script_id,
-    code: row.code,
+    code: redactCodeForHistory(row.code),
     success: row.success === 1,
     result: row.result ? JSON.parse(row.result) : null,
     error: row.error ? JSON.parse(row.error) : null,
-    logs: row.logs ? JSON.parse(row.logs) : [],
+    logs: redactLogsForHistory(row.logs ? JSON.parse(row.logs) : []),
     durationMs: row.duration_ms,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
