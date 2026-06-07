@@ -106,6 +106,12 @@ function migrateSchema() {
   if (!tableExists('ratelimit_rules')) {
     initRatelimitRulesTable();
   }
+  if (!tableExists('saved_scripts')) {
+    initSavedScriptsTable();
+  }
+  if (!tableExists('script_executions')) {
+    initScriptExecutionsTable();
+  }
 }
 
 function initChangelogTable() {
@@ -224,6 +230,40 @@ function initRatelimitRulesTable() {
   db.run('CREATE INDEX IF NOT EXISTS idx_ratelimit_pattern ON ratelimit_rules(pattern);');
 }
 
+function initSavedScriptsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS saved_scripts (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      description TEXT,
+      code TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_saved_scripts_name ON saved_scripts(name);');
+}
+
+function initScriptExecutionsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS script_executions (
+      id TEXT PRIMARY KEY,
+      script_name TEXT,
+      script_id TEXT,
+      code TEXT NOT NULL,
+      success INTEGER NOT NULL,
+      result TEXT,
+      error TEXT,
+      logs TEXT,
+      duration_ms INTEGER NOT NULL,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_executions_started ON script_executions(started_at DESC);');
+  db.run('CREATE INDEX IF NOT EXISTS idx_executions_script_id ON script_executions(script_id);');
+}
+
 function addBlocklistEntry(pattern, reason, expireMinutes) {
   const id = uuidv4();
   const now = Date.now();
@@ -317,6 +357,109 @@ function deleteRatelimitRule(id) {
   saveDatabase();
 }
 
+function saveScript(name, code, description) {
+  const existing = queryOne('SELECT id FROM saved_scripts WHERE name = ?', [name]);
+  const now = Date.now();
+  if (existing) {
+    run(
+      'UPDATE saved_scripts SET code = ?, description = ?, updated_at = ? WHERE id = ?',
+      [code, description || null, now, existing.id]
+    );
+    saveDatabase();
+    return getSavedScriptById(existing.id);
+  } else {
+    const id = uuidv4();
+    run(
+      'INSERT INTO saved_scripts (id, name, description, code, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, name, description || null, code, now, now]
+    );
+    saveDatabase();
+    return getSavedScriptById(id);
+  }
+}
+
+function getSavedScriptById(id) {
+  return queryOne('SELECT * FROM saved_scripts WHERE id = ?', [id]);
+}
+
+function getSavedScriptByName(name) {
+  return queryOne('SELECT * FROM saved_scripts WHERE name = ?', [name]);
+}
+
+function listSavedScripts() {
+  return queryAll('SELECT id, name, description, created_at, updated_at FROM saved_scripts ORDER BY updated_at DESC');
+}
+
+function deleteSavedScript(id) {
+  run('DELETE FROM saved_scripts WHERE id = ?', [id]);
+  saveDatabase();
+}
+
+function recordExecution(execution) {
+  const id = execution.id || uuidv4();
+  run(
+    'INSERT INTO script_executions (id, script_name, script_id, code, success, result, error, logs, duration_ms, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [
+      id,
+      execution.scriptName || null,
+      execution.scriptId || null,
+      execution.code,
+      execution.success ? 1 : 0,
+      execution.result !== undefined ? JSON.stringify(execution.result) : null,
+      execution.error ? JSON.stringify(execution.error) : null,
+      execution.logs ? JSON.stringify(execution.logs) : null,
+      execution.durationMs,
+      execution.startedAt,
+      execution.finishedAt,
+    ]
+  );
+  saveDatabase();
+  return getExecutionById(id);
+}
+
+function getExecutionById(id) {
+  const row = queryOne('SELECT * FROM script_executions WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    scriptName: row.script_name,
+    scriptId: row.script_id,
+    code: row.code,
+    success: row.success === 1,
+    result: row.result ? JSON.parse(row.result) : null,
+    error: row.error ? JSON.parse(row.error) : null,
+    logs: row.logs ? JSON.parse(row.logs) : [],
+    durationMs: row.duration_ms,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+  };
+}
+
+function listExecutions(limit = 50, scriptId = null) {
+  let sql = 'SELECT * FROM script_executions';
+  const params = [];
+  if (scriptId) {
+    sql += ' WHERE script_id = ?';
+    params.push(scriptId);
+  }
+  sql += ' ORDER BY started_at DESC LIMIT ?';
+  params.push(limit);
+  const rows = queryAll(sql, params);
+  return rows.map((row) => ({
+    id: row.id,
+    scriptName: row.script_name,
+    scriptId: row.script_id,
+    code: row.code,
+    success: row.success === 1,
+    result: row.result ? JSON.parse(row.result) : null,
+    error: row.error ? JSON.parse(row.error) : null,
+    logs: row.logs ? JSON.parse(row.logs) : [],
+    durationMs: row.duration_ms,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+  }));
+}
+
 function initSchema() {
   db.run(`
     CREATE TABLE IF NOT EXISTS zones (
@@ -356,6 +499,8 @@ function initSchema() {
   initBlocklistTable();
   initAllowlistTable();
   initRatelimitRulesTable();
+  initSavedScriptsTable();
+  initScriptExecutionsTable();
 }
 
 function beginTransaction() {
@@ -1164,4 +1309,12 @@ module.exports = {
   listRatelimitRules,
   updateRatelimitRule,
   deleteRatelimitRule,
+  saveScript,
+  getSavedScriptById,
+  getSavedScriptByName,
+  listSavedScripts,
+  deleteSavedScript,
+  recordExecution,
+  getExecutionById,
+  listExecutions,
 };

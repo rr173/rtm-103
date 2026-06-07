@@ -10,6 +10,7 @@ const { seedDemoData } = require('./seed/demoData');
 const { AnalysisDetector } = require('./analysis/detector');
 const { EnforcementManager } = require('./enforcement/enforcementManager');
 const { DnsServer } = require('./dns/dnsServer');
+const { ScriptSandbox } = require('./sandbox/scriptSandbox');
 
 const zonesRouter = require('./routes/zones');
 const createResolveRouter = require('./routes/resolve');
@@ -18,6 +19,7 @@ const createStatsRouter = require('./routes/stats');
 const createAnalysisRouter = require('./routes/analysis');
 const createEnforcementRouter = require('./routes/enforcement');
 const createProtocolRouter = require('./routes/protocol');
+const createSandboxRouter = require('./routes/sandbox');
 
 const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) {
@@ -140,6 +142,121 @@ function seedEnforcementData() {
   console.log('[Seed] Enforcement defaults injected.');
 }
 
+function seedSandboxData() {
+  console.log('[Seed] Injecting sandbox demo scripts...');
+
+  const demoScript = `// DNS 批量域名解析批量查询演示
+// 这个脚本演示了如何批量查询多个域名并格式化结果
+
+const domains = [
+  { name: 'www.example.com', type: 'A' },
+  { name: 'example.com', type: 'NS' },
+  { name: 'example.com', type: 'MX' },
+  { name: 'mail.example.com', type: 'A' },
+  { name: 'api.example.com', type: 'A' },
+];
+
+console.log('开始批量 DNS 查询...');
+
+const results = await dns.resolveBatch(domains);
+
+const summary = results.map((r) => ({
+  name: r.query.name,
+  type: r.query.type,
+  status: r.result ? r.result.status : 'ERROR',
+  answers: r.result ? r.result.answer.length : 0,
+  elapsedMs: r.result ? r.result.elapsedMs : 0,
+}));
+
+console.log('查询完成!');
+
+return {
+  total: results.length,
+  summary,
+  raw: results,
+};
+`;
+
+  const nxdomainTest = `// NXDOMAIN 检测脚本
+// 测试一些不存在的域名验证返回 NXDOMAIN
+
+const testDomains = [
+  'nonexistent.example.com',
+  'ghost.mysite.com',
+  'random-xyz-123.invalid',
+];
+
+console.log('测试 NXDOMAIN 检测...');
+
+const results = await dns.resolveBatch(testDomains);
+
+const nxdomainCount = results.filter((r) => r.result && r.result.status === 'NXDOMAIN').length;
+
+console.log(\`测试完成: \${nxdomainCount}/\${results.length} 个域名返回 NXDOMAIN\`);
+
+return {
+  total: results.length,
+  nxdomainCount,
+  details: results.map((r) => ({
+    name: typeof r.query === 'string' ? r.query : (r.query.name || r.query),
+    status: r.result ? r.result.status : 'ERROR',
+  })),
+};
+`;
+
+  const dnstypeExplorer = `// 多记录类型探索
+// 对同一域名查询不同记录类型
+
+const target = 'example.com';
+const types = ['A', 'AAAA', 'MX', 'TXT', 'NS', 'SOA'];
+
+console.log(\`探索 \${target} 的各类记录查询\`);
+
+const queries = types.map((t) => ({ name: target, type: t }));
+const results = await dns.resolveBatch(queries);
+
+const found = results.filter((r) => r.result && r.result.status === 'SUCCESS' && r.result.answer.length > 0);
+
+console.log(\`找到 \${found.length}/\${types.length} 种记录类型\`);
+
+return {
+  target,
+  found: found.map((f) => ({
+    type: f.query.type,
+    answers: f.result.answer,
+  })),
+  all: results,
+};
+`;
+
+  const existing = db.listSavedScripts();
+  const existingNames = new Set(existing.map((s) => s.name));
+
+  if (!existingNames.has('demo-batch-query')) {
+    db.saveScript(
+      'demo-batch-query',
+      demoScript,
+      '批量域名解析演示：查询多个域名并展示结果汇总'
+    );
+  }
+  if (!existingNames.has('demo-nxdomain-test')) {
+    db.saveScript(
+      'demo-nxdomain-test',
+      nxdomainTest,
+      'NXDOMAIN 检测：验证不存在域名的返回结果'
+    );
+  }
+  if (!existingNames.has('demo-type-explorer')) {
+    db.saveScript(
+      'demo-type-explorer',
+      dnstypeExplorer,
+      '多记录类型探索：查询同一域名的不同 DNS 记录类型'
+    );
+  }
+
+  console.log('[Seed] Sandbox demo scripts injected.');
+}
+
 async function bootstrap() {
   await db.initDatabase();
 
@@ -149,6 +266,10 @@ async function bootstrap() {
   const detector = new AnalysisDetector(statsLogger);
   const enforcementManager = new EnforcementManager();
   const dnsServer = new DnsServer(resolver, enforcementManager);
+  const sandbox = new ScriptSandbox(resolver, {
+    timeoutMs: parseInt(process.env.SANDBOX_TIMEOUT_MS, 10) || 5000,
+    maxConcurrent: parseInt(process.env.SANDBOX_MAX_CONCURRENT, 10) || 5,
+  });
 
   const app = express();
 
@@ -175,6 +296,7 @@ async function bootstrap() {
   app.use('/api', createAnalysisRouter(detector));
   app.use('/api', createEnforcementRouter(enforcementManager));
   app.use('/api', createProtocolRouter(dnsServer));
+  app.use('/api', createSandboxRouter(sandbox));
 
   app.use((err, _req, res, _next) => {
     console.error('Unhandled error:', err);
@@ -184,6 +306,7 @@ async function bootstrap() {
   seedDemoData();
   seedAnalysisData(detector);
   seedEnforcementData();
+  seedSandboxData();
 
   await dnsServer.start();
 
@@ -251,6 +374,17 @@ async function bootstrap() {
     console.log('║   POST   /api/protocol/config  { port }                         ║');
     console.log('║   dig @127.0.0.1 -p 5353 www.example.com A                      ║');
     console.log('║   dig @127.0.0.1 -p 5353 +tcp www.example.com A                 ║');
+    console.log('╠════════════════════════════════════════════════════════════════╣');
+    console.log('║   Script Sandbox:                                               ║');
+    console.log('║   GET    /api/sandbox/stats                                     ║');
+    console.log('║   POST   /api/sandbox/execute   { code, timeoutMs? }            ║');
+    console.log('║   GET    /api/sandbox/scripts                                   ║');
+    console.log('║   POST   /api/sandbox/scripts   { name, code, description? }    ║');
+    console.log('║   GET    /api/sandbox/scripts/:id                               ║');
+    console.log('║   DELETE /api/sandbox/scripts/:id                               ║');
+    console.log('║   GET    /api/sandbox/executions?limit=50                       ║');
+    console.log('║   GET    /api/sandbox/executions/:id                            ║');
+    console.log('║   Sandbox available APIs: dns.resolve(), dns.resolveBatch()     ║');
     console.log('╚════════════════════════════════════════════════════════════════╝');
     console.log('');
   });
