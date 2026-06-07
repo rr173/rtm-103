@@ -7,6 +7,7 @@ services:
     ports:
       - "3000:3000"
       - "5353:5353/udp"
+      - "5353:5353/tcp"
     volumes:
       - dns-data:/app/data
     environment:

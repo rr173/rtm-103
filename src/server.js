@@ -9,7 +9,7 @@ const { RecursiveResolver } = require('./resolver/recursiveResolver');
 const { seedDemoData } = require('./seed/demoData');
 const { AnalysisDetector } = require('./analysis/detector');
 const { EnforcementManager } = require('./enforcement/enforcementManager');
-const { DnsUdpServer } = require('./dns/dnsServer');
+const { DnsServer } = require('./dns/dnsServer');
 
 const zonesRouter = require('./routes/zones');
 const createResolveRouter = require('./routes/resolve');
@@ -148,7 +148,7 @@ async function bootstrap() {
   const resolver = new RecursiveResolver(cacheManager, statsLogger);
   const detector = new AnalysisDetector(statsLogger);
   const enforcementManager = new EnforcementManager();
-  const dnsServer = new DnsUdpServer(resolver, enforcementManager);
+  const dnsServer = new DnsServer(resolver, enforcementManager);
 
   const app = express();
 
@@ -193,7 +193,7 @@ async function bootstrap() {
     console.log('║   DNS Recursive Resolver Simulator                             ║');
     console.log('╠════════════════════════════════════════════════════════════════╣');
     console.log(`║   Server running on http://localhost:${PORT}                     ║`);
-    console.log(`║   DNS UDP listening on port ${dnsServer.port}                                 ║`);
+    console.log(`║   DNS UDP/TCP listening on port ${dnsServer.port}                             ║`);
     console.log('╠════════════════════════════════════════════════════════════════╣');
     console.log('║   API Endpoints:                                                ║');
     console.log('║   GET    /api/health                                            ║');
@@ -250,6 +250,7 @@ async function bootstrap() {
     console.log('║   GET    /api/protocol/stats                                    ║');
     console.log('║   POST   /api/protocol/config  { port }                         ║');
     console.log('║   dig @127.0.0.1 -p 5353 www.example.com A                      ║');
+    console.log('║   dig @127.0.0.1 -p 5353 +tcp www.example.com A                 ║');
     console.log('╚════════════════════════════════════════════════════════════════╝');
     console.log('');
   });
