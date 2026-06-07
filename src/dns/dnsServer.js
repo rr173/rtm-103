@@ -313,6 +313,7 @@ class DnsTcpServer {
   start() {
     return new Promise((resolve, reject) => {
       this.server = net.createServer();
+      this.server.maxConnections = MAX_TCP_CONNECTIONS;
 
       this.server.on('error', (err) => {
         console.error(`[DNS-TCP] Server error: ${err.message}`);
@@ -325,7 +326,7 @@ class DnsTcpServer {
 
       this.server.listen(this.port, '0.0.0.0', () => {
         const addr = this.server.address();
-        console.log(`[DNS-TCP] Listening on ${addr.address}:${addr.port}`);
+        console.log(`[DNS-TCP] Listening on ${addr.address}:${addr.port} (maxConnections=${MAX_TCP_CONNECTIONS})`);
         resolve();
       });
     });
@@ -356,17 +357,37 @@ class DnsTcpServer {
     const remoteAddr = `${socket.remoteAddress}:${socket.remotePort}`;
 
     if (this.connections.size >= MAX_TCP_CONNECTIONS) {
-      console.log(`[DNS-TCP] Connection limit reached (${MAX_TCP_CONNECTIONS}), rejecting ${remoteAddr}`);
-      socket.resetAndDestroy ? socket.resetAndDestroy() : socket.destroy();
+      console.log(`[DNS-TCP] Connection limit exceeded (${this.connections.size}/${MAX_TCP_CONNECTIONS}), rejecting ${remoteAddr} with RST`);
+      try {
+        socket.setTimeout(0);
+        socket.setKeepAlive(false);
+        if (typeof socket.resetAndDestroy === 'function') {
+          socket.resetAndDestroy();
+        } else {
+          socket.once('error', () => {});
+          try { socket.setLinger(true, 0); } catch (e) {}
+          socket.destroy();
+        }
+      } catch (e) {}
       return;
     }
 
     this.connections.add(socket);
     this.stats.tcpConnections = this.connections.size;
     this.stats.tcpTotalConnections += 1;
-    console.log(`[DNS-TCP] New connection from ${remoteAddr} (active: ${this.stats.tcpConnections})`);
+    console.log(`[DNS-TCP] New connection from ${remoteAddr} (active: ${this.stats.tcpConnections}/${MAX_TCP_CONNECTIONS})`);
 
-    socket.setTimeout(TCP_IDLE_TIMEOUT_MS);
+    let idleTimer = null;
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        console.log(`[DNS-TCP] Connection idle timeout from ${remoteAddr}`);
+        try {
+          socket.destroy();
+        } catch (e) {}
+      }, TCP_IDLE_TIMEOUT_MS);
+    };
+    resetIdleTimer();
 
     let receiveBuffer = Buffer.alloc(0);
 
@@ -385,19 +406,14 @@ class DnsTcpServer {
     };
 
     socket.on('data', (data) => {
-      socket.setTimeout(TCP_IDLE_TIMEOUT_MS);
+      resetIdleTimer();
       receiveBuffer = Buffer.concat([receiveBuffer, data]);
       try {
         processBuffer();
       } catch (err) {
         console.error(`[DNS-TCP] Error processing data from ${remoteAddr}: ${err.message}`);
-        socket.destroy();
+        try { socket.destroy(); } catch (e) {}
       }
-    });
-
-    socket.on('timeout', () => {
-      console.log(`[DNS-TCP] Connection idle timeout from ${remoteAddr}`);
-      socket.destroy();
     });
 
     socket.on('error', (err) => {
@@ -405,6 +421,7 @@ class DnsTcpServer {
     });
 
     socket.on('close', () => {
+      if (idleTimer) clearTimeout(idleTimer);
       this.connections.delete(socket);
       this.stats.tcpConnections = this.connections.size;
       console.log(`[DNS-TCP] Connection closed from ${remoteAddr} (active: ${this.stats.tcpConnections})`);
