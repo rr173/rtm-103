@@ -14,9 +14,10 @@ const MAX_TCP_CONNECTIONS = 20;
 const TCP_IDLE_TIMEOUT_MS = 60000;
 
 class DnsMessageHandler {
-  constructor(resolver, enforcementManager, stats) {
+  constructor(resolver, enforcementManager, policyEngine, stats) {
     this.resolver = resolver;
     this.enforcementManager = enforcementManager;
+    this.policyEngine = policyEngine;
     this.stats = stats;
   }
 
@@ -66,7 +67,22 @@ class DnsMessageHandler {
         return;
       }
 
-      const result = await this.resolver.resolve(queryName, queryType, false);
+      let result = await this.resolver.resolve(queryName, queryType, false);
+
+      if (this.policyEngine) {
+        result = await this.policyEngine.applyPolicies(queryName, queryType, result);
+
+        if (result.policyApplied && result.answer) {
+          const minTtl = result.answer.length > 0
+            ? Math.min(...result.answer.map((r) => r.ttl || 3600))
+            : 3600;
+          this.resolver.cache.set(queryName, queryType, {
+            answer: result.answer,
+            authority: result.authority,
+            trace: result.trace || [],
+          }, minTtl);
+        }
+      }
 
       const mappedRcode = RCODE_MAP[result.status];
       let rcode;
@@ -136,9 +152,10 @@ class DnsMessageHandler {
 }
 
 class DnsUdpServer {
-  constructor(resolver, enforcementManager) {
+  constructor(resolver, enforcementManager, policyEngine) {
     this.resolver = resolver;
     this.enforcementManager = enforcementManager;
+    this.policyEngine = policyEngine;
     this.socket = null;
     this.port = parseInt(process.env.DNS_PORT, 10) || 5353;
     this.stats = {
@@ -153,7 +170,7 @@ class DnsUdpServer {
         5: 0,
       },
     };
-    this.handler = new DnsMessageHandler(resolver, enforcementManager, this.stats);
+    this.handler = new DnsMessageHandler(resolver, enforcementManager, policyEngine, this.stats);
   }
 
   setPort(port) {
@@ -249,9 +266,10 @@ class DnsUdpServer {
 }
 
 class DnsTcpServer {
-  constructor(resolver, enforcementManager) {
+  constructor(resolver, enforcementManager, policyEngine) {
     this.resolver = resolver;
     this.enforcementManager = enforcementManager;
+    this.policyEngine = policyEngine;
     this.server = null;
     this.port = parseInt(process.env.DNS_PORT, 10) || 5353;
     this.connections = new Set();
@@ -270,7 +288,7 @@ class DnsTcpServer {
       tcpTotalQueries: 0,
       tcpTotalConnections: 0,
     };
-    this.handler = new DnsMessageHandler(resolver, enforcementManager, this.stats);
+    this.handler = new DnsMessageHandler(resolver, enforcementManager, policyEngine, this.stats);
   }
 
   setPort(port) {
@@ -445,9 +463,9 @@ class DnsTcpServer {
 }
 
 class DnsServer {
-  constructor(resolver, enforcementManager) {
-    this.udpServer = new DnsUdpServer(resolver, enforcementManager);
-    this.tcpServer = new DnsTcpServer(resolver, enforcementManager);
+  constructor(resolver, enforcementManager, policyEngine) {
+    this.udpServer = new DnsUdpServer(resolver, enforcementManager, policyEngine);
+    this.tcpServer = new DnsTcpServer(resolver, enforcementManager, policyEngine);
   }
 
   get port() {

@@ -11,6 +11,7 @@ const { AnalysisDetector } = require('./analysis/detector');
 const { EnforcementManager } = require('./enforcement/enforcementManager');
 const { DnsServer } = require('./dns/dnsServer');
 const { ScriptSandbox } = require('./sandbox/scriptSandbox');
+const { PolicyEngine } = require('./policy/policyEngine');
 
 const zonesRouter = require('./routes/zones');
 const createResolveRouter = require('./routes/resolve');
@@ -20,6 +21,7 @@ const createAnalysisRouter = require('./routes/analysis');
 const createEnforcementRouter = require('./routes/enforcement');
 const createProtocolRouter = require('./routes/protocol');
 const createSandboxRouter = require('./routes/sandbox');
+const createPoliciesRouter = require('./routes/policies');
 
 const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) {
@@ -140,6 +142,67 @@ function seedEnforcementData() {
   }
 
   console.log('[Seed] Enforcement defaults injected.');
+}
+
+function seedPolicyData() {
+  console.log('[Seed] Injecting policy demo rules...');
+
+  const existingPolicies = db.listPolicies();
+  const policyNames = new Set(existingPolicies.map((p) => p.name));
+
+  if (!policyNames.has('non-work-hours-internal-rewrite')) {
+    db.addPolicy({
+      name: 'non-work-hours-internal-rewrite',
+      description: '非工作时间将*.internal.example.com解析到公网IP',
+      priority: 10,
+      enabled: true,
+      domainPattern: '*.internal.example.com',
+      recordType: 'A',
+      timeWindow: '* 0-8,19-23 *',
+      responseRegex: null,
+      action: 'rewrite',
+      actionParams: { template: '203.0.113.50' },
+    });
+  }
+
+  if (!policyNames.has('redirect-10-0-0-8-to-fallback')) {
+    db.addPolicy({
+      name: 'redirect-10-0-0-8-to-fallback',
+      description: '将指向10.0.0.0/8网段的A记录重定向到fallback.example.com',
+      priority: 20,
+      enabled: true,
+      domainPattern: null,
+      recordType: 'A',
+      timeWindow: null,
+      responseRegex: '^10\\.',
+      action: 'redirect',
+      actionParams: { targetDomain: 'fallback.example.com' },
+    });
+  }
+
+  if (!policyNames.has('nxdomain-evil-redirect')) {
+    db.addPolicy({
+      name: 'nxdomain-evil-redirect',
+      description: '强制evil-redirect.example.com返回NXDOMAIN',
+      priority: 30,
+      enabled: true,
+      domainPattern: 'evil-redirect.example.com',
+      recordType: null,
+      timeWindow: null,
+      responseRegex: null,
+      action: 'nxdomain',
+      actionParams: null,
+    });
+  }
+
+  console.log('[Seed] Policy demo rules injected.');
+  console.log('[Seed] Policy demo test queries:');
+  console.log('  POST /api/resolve { "name": "app.internal.example.com", "type": "A" }');
+  console.log('    -> 工作时间返回10.0.0.10, 非工作时间返回203.0.113.50');
+  console.log('  POST /api/resolve { "name": "private-resource.example.com", "type": "A" }');
+  console.log('    -> 包含10.x.x.x地址,被redirect到fallback.example.com(203.0.113.100)');
+  console.log('  POST /api/resolve { "name": "evil-redirect.example.com", "type": "A" }');
+  console.log('    -> 强制返回NXDOMAIN');
 }
 
 function seedSandboxData() {
@@ -265,7 +328,8 @@ async function bootstrap() {
   const resolver = new RecursiveResolver(cacheManager, statsLogger);
   const detector = new AnalysisDetector(statsLogger);
   const enforcementManager = new EnforcementManager();
-  const dnsServer = new DnsServer(resolver, enforcementManager);
+  const policyEngine = new PolicyEngine(resolver);
+  const dnsServer = new DnsServer(resolver, enforcementManager, policyEngine);
   const sandbox = new ScriptSandbox(resolver, {
     timeoutMs: parseInt(process.env.SANDBOX_TIMEOUT_MS, 10) || 5000,
     maxConcurrent: parseInt(process.env.SANDBOX_MAX_CONCURRENT, 10) || 5,
@@ -290,13 +354,14 @@ async function bootstrap() {
   });
 
   app.use('/api', zonesRouter);
-  app.use('/api', createResolveRouter(resolver, detector, enforcementManager));
+  app.use('/api', createResolveRouter(resolver, detector, enforcementManager, policyEngine));
   app.use('/api', createCacheRouter(cacheManager));
   app.use('/api', createStatsRouter(statsLogger));
   app.use('/api', createAnalysisRouter(detector));
   app.use('/api', createEnforcementRouter(enforcementManager));
   app.use('/api', createProtocolRouter(dnsServer));
   app.use('/api', createSandboxRouter(sandbox));
+  app.use('/api', createPoliciesRouter(policyEngine));
 
   app.use((err, _req, res, _next) => {
     console.error('Unhandled error:', err);
@@ -307,6 +372,7 @@ async function bootstrap() {
   seedAnalysisData(detector);
   seedEnforcementData();
   seedSandboxData();
+  seedPolicyData();
 
   await dnsServer.start();
 
@@ -385,6 +451,16 @@ async function bootstrap() {
     console.log('║   GET    /api/sandbox/executions?limit=50                       ║');
     console.log('║   GET    /api/sandbox/executions/:id                            ║');
     console.log('║   Sandbox available APIs: dns.resolve(), dns.resolveBatch()     ║');
+    console.log('╠════════════════════════════════════════════════════════════════╣');
+    console.log('║   Response Policies:                                             ║');
+    console.log('║   POST   /api/policies                                          ║');
+    console.log('║   GET    /api/policies                                          ║');
+    console.log('║   GET    /api/policies/:id                                      ║');
+    console.log('║   PUT    /api/policies/:id                                      ║');
+    console.log('║   DELETE /api/policies/:id                                      ║');
+    console.log('║   POST   /api/policies/reorder                                  ║');
+    console.log('║   GET    /api/policies/logs?limit=50                            ║');
+    console.log('║   GET    /api/policies/stats                                    ║');
     console.log('╚════════════════════════════════════════════════════════════════╝');
     console.log('');
   });

@@ -112,6 +112,12 @@ function migrateSchema() {
   if (!tableExists('script_executions')) {
     initScriptExecutionsTable();
   }
+  if (!tableExists('policies')) {
+    initPoliciesTable();
+  }
+  if (!tableExists('policy_logs')) {
+    initPolicyLogsTable();
+  }
 }
 
 function initChangelogTable() {
@@ -262,6 +268,239 @@ function initScriptExecutionsTable() {
   `);
   db.run('CREATE INDEX IF NOT EXISTS idx_executions_started ON script_executions(started_at DESC);');
   db.run('CREATE INDEX IF NOT EXISTS idx_executions_script_id ON script_executions(script_id);');
+}
+
+function initPoliciesTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS policies (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      priority INTEGER NOT NULL DEFAULT 100,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      domain_pattern TEXT,
+      record_type TEXT,
+      time_window TEXT,
+      response_regex TEXT,
+      action TEXT NOT NULL,
+      action_params TEXT,
+      hit_count INTEGER NOT NULL DEFAULT 0,
+      last_hit_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_policies_priority ON policies(priority, created_at);');
+  db.run('CREATE INDEX IF NOT EXISTS idx_policies_enabled ON policies(enabled);');
+}
+
+function initPolicyLogsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS policy_logs (
+      id TEXT PRIMARY KEY,
+      query_name TEXT NOT NULL,
+      query_type TEXT NOT NULL,
+      policy_id TEXT,
+      action TEXT NOT NULL,
+      original_answer TEXT,
+      modified_answer TEXT,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_policy_logs_created ON policy_logs(created_at DESC);');
+  db.run('CREATE INDEX IF NOT EXISTS idx_policy_logs_policy ON policy_logs(policy_id);');
+}
+
+function addPolicy(policy) {
+  const id = uuidv4();
+  const now = Date.now();
+  run(
+    'INSERT INTO policies (id, name, description, priority, enabled, domain_pattern, record_type, time_window, response_regex, action, action_params, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [
+      id,
+      policy.name,
+      policy.description || null,
+      policy.priority !== undefined ? policy.priority : 100,
+      policy.enabled !== undefined ? (policy.enabled ? 1 : 0) : 1,
+      policy.domainPattern || null,
+      policy.recordType || null,
+      policy.timeWindow || null,
+      policy.responseRegex || null,
+      policy.action,
+      policy.actionParams ? JSON.stringify(policy.actionParams) : null,
+      now,
+      now,
+    ]
+  );
+  saveDatabase();
+  return getPolicyById(id);
+}
+
+function getPolicyById(id) {
+  const row = queryOne('SELECT * FROM policies WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    priority: row.priority,
+    enabled: row.enabled === 1,
+    domainPattern: row.domain_pattern,
+    recordType: row.record_type,
+    timeWindow: row.time_window,
+    responseRegex: row.response_regex,
+    action: row.action,
+    actionParams: row.action_params ? JSON.parse(row.action_params) : null,
+    hitCount: row.hit_count,
+    lastHitAt: row.last_hit_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function listPolicies() {
+  const rows = queryAll('SELECT * FROM policies ORDER BY priority ASC, created_at ASC');
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    priority: row.priority,
+    enabled: row.enabled === 1,
+    domainPattern: row.domain_pattern,
+    recordType: row.record_type,
+    timeWindow: row.time_window,
+    responseRegex: row.response_regex,
+    action: row.action,
+    actionParams: row.action_params ? JSON.parse(row.action_params) : null,
+    hitCount: row.hit_count,
+    lastHitAt: row.last_hit_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+function updatePolicy(id, updates) {
+  const current = getPolicyById(id);
+  if (!current) return null;
+  const now = Date.now();
+
+  const fields = [];
+  const params = [];
+
+  if (updates.name !== undefined) { fields.push('name = ?'); params.push(updates.name); }
+  if (updates.description !== undefined) { fields.push('description = ?'); params.push(updates.description); }
+  if (updates.priority !== undefined) { fields.push('priority = ?'); params.push(updates.priority); }
+  if (updates.enabled !== undefined) { fields.push('enabled = ?'); params.push(updates.enabled ? 1 : 0); }
+  if (updates.domainPattern !== undefined) { fields.push('domain_pattern = ?'); params.push(updates.domainPattern || null); }
+  if (updates.recordType !== undefined) { fields.push('record_type = ?'); params.push(updates.recordType || null); }
+  if (updates.timeWindow !== undefined) { fields.push('time_window = ?'); params.push(updates.timeWindow || null); }
+  if (updates.responseRegex !== undefined) { fields.push('response_regex = ?'); params.push(updates.responseRegex || null); }
+  if (updates.action !== undefined) { fields.push('action = ?'); params.push(updates.action); }
+  if (updates.actionParams !== undefined) { fields.push('action_params = ?'); params.push(updates.actionParams ? JSON.stringify(updates.actionParams) : null); }
+
+  fields.push('updated_at = ?');
+  params.push(now);
+  params.push(id);
+
+  run(`UPDATE policies SET ${fields.join(', ')} WHERE id = ?`, params);
+  saveDatabase();
+  return getPolicyById(id);
+}
+
+function deletePolicy(id) {
+  run('DELETE FROM policies WHERE id = ?', [id]);
+  saveDatabase();
+}
+
+function incrementPolicyHit(id) {
+  const now = Date.now();
+  run('UPDATE policies SET hit_count = hit_count + 1, last_hit_at = ? WHERE id = ?', [now, id]);
+}
+
+function reorderPolicies(policyIds) {
+  const now = Date.now();
+  beginTransaction();
+  try {
+    for (let i = 0; i < policyIds.length; i++) {
+      run('UPDATE policies SET priority = ?, updated_at = ? WHERE id = ?', [i, now, policyIds[i]]);
+    }
+    commitTransaction();
+  } catch (err) {
+    rollbackTransaction();
+    throw err;
+  }
+  saveDatabase();
+  return listPolicies();
+}
+
+function addPolicyLog(log) {
+  const id = uuidv4();
+  const now = Date.now();
+  run(
+    'INSERT INTO policy_logs (id, query_name, query_type, policy_id, action, original_answer, modified_answer, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [
+      id,
+      log.queryName,
+      log.queryType,
+      log.policyId || null,
+      log.action,
+      log.originalAnswer ? JSON.stringify(log.originalAnswer) : null,
+      log.modifiedAnswer ? JSON.stringify(log.modifiedAnswer) : null,
+      now,
+    ]
+  );
+  saveDatabase();
+  return getPolicyLogById(id);
+}
+
+function getPolicyLogById(id) {
+  const row = queryOne('SELECT * FROM policy_logs WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    queryName: row.query_name,
+    queryType: row.query_type,
+    policyId: row.policy_id,
+    action: row.action,
+    originalAnswer: row.original_answer ? JSON.parse(row.original_answer) : null,
+    modifiedAnswer: row.modified_answer ? JSON.parse(row.modified_answer) : null,
+    createdAt: row.created_at,
+  };
+}
+
+function listPolicyLogs(limit = 50) {
+  const rows = queryAll('SELECT * FROM policy_logs ORDER BY created_at DESC LIMIT ?', [limit]);
+  return rows.map((row) => ({
+    id: row.id,
+    queryName: row.query_name,
+    queryType: row.query_type,
+    policyId: row.policy_id,
+    action: row.action,
+    originalAnswer: row.original_answer ? JSON.parse(row.original_answer) : null,
+    modifiedAnswer: row.modified_answer ? JSON.parse(row.modified_answer) : null,
+    createdAt: row.created_at,
+  }));
+}
+
+function getPolicyStats() {
+  const rows = queryAll('SELECT id, name, hit_count, last_hit_at FROM policies ORDER BY priority ASC, created_at ASC');
+  return rows.map((row) => ({
+    policyId: row.id,
+    policyName: row.name,
+    hitCount: row.hit_count,
+    lastHitAt: row.last_hit_at,
+  }));
+}
+
+function trimPolicyLogs(maxLogs = 10000) {
+  const count = queryOne('SELECT COUNT(*) as cnt FROM policy_logs');
+  if (count && count.cnt > maxLogs) {
+    const toDelete = count.cnt - maxLogs;
+    run(
+      'DELETE FROM policy_logs WHERE id IN (SELECT id FROM policy_logs ORDER BY created_at ASC LIMIT ?)',
+      [toDelete]
+    );
+  }
 }
 
 function addBlocklistEntry(pattern, reason, expireMinutes) {
@@ -548,6 +787,8 @@ function initSchema() {
   initRatelimitRulesTable();
   initSavedScriptsTable();
   initScriptExecutionsTable();
+  initPoliciesTable();
+  initPolicyLogsTable();
 }
 
 function beginTransaction() {
@@ -1364,4 +1605,16 @@ module.exports = {
   recordExecution,
   getExecutionById,
   listExecutions,
+  addPolicy,
+  getPolicyById,
+  listPolicies,
+  updatePolicy,
+  deletePolicy,
+  incrementPolicyHit,
+  reorderPolicies,
+  addPolicyLog,
+  getPolicyLogById,
+  listPolicyLogs,
+  getPolicyStats,
+  trimPolicyLogs,
 };

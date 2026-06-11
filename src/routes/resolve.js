@@ -1,6 +1,6 @@
 const express = require('express');
 
-function createResolveRouter(resolver, detector, enforcementManager) {
+function createResolveRouter(resolver, detector, enforcementManager, policyEngine) {
   const router = express.Router();
 
   router.post('/resolve', async (req, res) => {
@@ -66,7 +66,22 @@ function createResolveRouter(resolver, detector, enforcementManager) {
         }
       }
 
-      const result = await resolver.resolve(name, queryType, !!dnssec);
+      let result = await resolver.resolve(name, queryType, !!dnssec);
+
+      if (policyEngine) {
+        result = await policyEngine.applyPolicies(name, queryType, result);
+
+        if (result.policyApplied && result.answer) {
+          const minTtl = result.answer.length > 0
+            ? Math.min(...result.answer.map((r) => r.ttl || 3600))
+            : 3600;
+          resolver.cache.set(name, queryType, {
+            answer: result.answer,
+            authority: result.authority,
+            trace: result.trace || [],
+          }, minTtl);
+        }
+      }
 
       if (detector) {
         detector.recordQueryExtended({

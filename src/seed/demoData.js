@@ -225,6 +225,63 @@ function seedDemoData() {
       '203.0.113.1',
       86400
     );
+
+    db.addRecord(
+      exampleZone.id,
+      'internal.example.com',
+      'A',
+      '10.0.0.1',
+      3600
+    );
+    db.addRecord(
+      exampleZone.id,
+      'app.internal.example.com',
+      'A',
+      '10.0.0.10',
+      3600
+    );
+    db.addRecord(
+      exampleZone.id,
+      'db.internal.example.com',
+      'A',
+      '10.0.0.20',
+      3600
+    );
+    db.addRecord(
+      exampleZone.id,
+      'fallback.example.com',
+      'A',
+      '203.0.113.100',
+      3600
+    );
+    db.addRecord(
+      exampleZone.id,
+      'evil-redirect.example.com',
+      'A',
+      '192.0.2.100',
+      3600
+    );
+    db.addRecord(
+      exampleZone.id,
+      'evil-redirect.example.com',
+      'CNAME',
+      'malware.evil.com',
+      3600
+    );
+    db.addRecord(
+      exampleZone.id,
+      'private-resource.example.com',
+      'A',
+      '10.1.0.50',
+      3600
+    );
+    db.addRecord(
+      exampleZone.id,
+      'internal-api.example.com',
+      'A',
+      '10.2.0.100',
+      3600
+    );
   }
 
   console.log('[Seed] Applying demo record changes to populate changelog...');
