@@ -198,7 +198,7 @@ function seedPolicyData() {
   console.log('[Seed] Policy demo rules injected.');
   console.log('[Seed] Policy demo test queries:');
   console.log('  POST /api/resolve { "name": "app.internal.example.com", "type": "A" }');
-  console.log('    -> 工作时间返回10.0.0.10, 非工作时间返回203.0.113.50');
+  console.log('    -> 工作时间返回172.16.0.10, 非工作时间返回203.0.113.50');
   console.log('  POST /api/resolve { "name": "private-resource.example.com", "type": "A" }');
   console.log('    -> 包含10.x.x.x地址,被redirect到fallback.example.com(203.0.113.100)');
   console.log('  POST /api/resolve { "name": "evil-redirect.example.com", "type": "A" }');

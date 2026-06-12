@@ -230,21 +230,21 @@ function seedDemoData() {
       exampleZone.id,
       'internal.example.com',
       'A',
-      '10.0.0.1',
+      '172.16.0.1',
       3600
     );
     db.addRecord(
       exampleZone.id,
       'app.internal.example.com',
       'A',
-      '10.0.0.10',
+      '172.16.0.10',
       3600
     );
     db.addRecord(
       exampleZone.id,
       'db.internal.example.com',
       'A',
-      '10.0.0.20',
+      '172.16.0.20',
       3600
     );
     db.addRecord(
