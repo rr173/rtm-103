@@ -42,21 +42,21 @@ function parseCronField(field, min, max) {
 function matchTimeWindow(timeWindow) {
   if (!timeWindow) return true;
   const parts = timeWindow.trim().split(/\s+/);
-  const minuteField = parts[0] || '*';
-  const hourField = parts[1] || '*';
+  const hourField = parts[0] || '*';
+  const minuteField = parts[1] || '*';
   const dowField = parts[2] || '*';
 
   const now = new Date();
-  const currentMinute = now.getMinutes();
   const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
   const currentDow = now.getDay();
 
-  const minutes = parseCronField(minuteField, 0, 59);
   const hours = parseCronField(hourField, 0, 23);
+  const minutes = parseCronField(minuteField, 0, 59);
   const dows = parseCronField(dowField, 0, 6);
 
-  if (minutes && !minutes.has(currentMinute)) return false;
   if (hours && !hours.has(currentHour)) return false;
+  if (minutes && !minutes.has(currentMinute)) return false;
   if (dows && !dows.has(currentDow)) return false;
 
   return true;
@@ -191,7 +191,7 @@ class PolicyEngine {
     this.resolver = resolver;
   }
 
-  async applyPolicies(queryName, queryType, result) {
+  async applyPolicies(queryName, queryType, result, _redirectDepth = 0) {
     const originalAnswer = result.answer ? [...result.answer] : [];
     const originalStatus = result.status;
     const policies = db.listPolicies();
@@ -202,8 +202,8 @@ class PolicyEngine {
     let modifiedAnswer = originalAnswer;
     let modifiedStatus = originalStatus;
     let modifiedAuthority = result.authority ? [...result.authority] : [];
-    let redirectDepth = 0;
     let passthrough = false;
+    let redirectChain = [];
 
     for (const policy of enabledPolicies) {
       if (passthrough) break;
@@ -222,22 +222,31 @@ class PolicyEngine {
           break;
 
         case 'redirect':
-          if (redirectDepth >= MAX_REDIRECT_DEPTH) {
+          if (_redirectDepth >= MAX_REDIRECT_DEPTH) {
             executedAction = 'redirect_limit_exceeded';
             break;
           }
           const params = policy.actionParams || {};
           const targetDomain = params.targetDomain;
           if (targetDomain) {
-            redirectDepth++;
-            const redirectResult = await this.resolver.resolve(
+            const redirectResolveResult = await this.resolver.resolve(
               targetDomain,
               queryType,
               false
             );
-            modifiedAnswer = redirectResult.answer || [];
-            modifiedAuthority = redirectResult.authority || [];
-            modifiedStatus = redirectResult.status;
+            const policyAppliedResult = await this.applyPolicies(
+              targetDomain,
+              queryType,
+              redirectResolveResult,
+              _redirectDepth + 1
+            );
+            modifiedAnswer = policyAppliedResult.answer || [];
+            modifiedAuthority = policyAppliedResult.authority || [];
+            modifiedStatus = policyAppliedResult.status;
+            redirectChain = [policy.id, ...(policyAppliedResult.redirectChain || [])];
+            if (policyAppliedResult.executedAction) {
+              executedAction = `redirect->${policyAppliedResult.executedAction}`;
+            }
           }
           break;
 
@@ -275,6 +284,7 @@ class PolicyEngine {
       policyApplied: matchedPolicyId !== null,
       matchedPolicyId,
       executedAction,
+      redirectChain,
     };
   }
 

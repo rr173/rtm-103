@@ -158,7 +158,7 @@ function seedPolicyData() {
       enabled: true,
       domainPattern: '*.internal.example.com',
       recordType: 'A',
-      timeWindow: '* 0-8,19-23 *',
+      timeWindow: '0-8,19-23 * *',
       responseRegex: null,
       action: 'rewrite',
       actionParams: { template: '203.0.113.50' },
