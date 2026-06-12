@@ -118,6 +118,30 @@ function migrateSchema() {
   if (!tableExists('policy_logs')) {
     initPolicyLogsTable();
   }
+  if (!tableExists('config_snapshots')) {
+    initConfigSnapshotsTable();
+  }
+  if (!tableExists('drafts')) {
+    initDraftsTable();
+  }
+  if (!tableExists('draft_changes')) {
+    initDraftChangesTable();
+  }
+  if (!tableExists('sample_sets')) {
+    initSampleSetsTable();
+  }
+  if (!tableExists('samples')) {
+    initSamplesTable();
+  }
+  if (!tableExists('playback_reports')) {
+    initPlaybackReportsTable();
+  }
+  if (!tableExists('playback_results')) {
+    initPlaybackResultsTable();
+  }
+  if (!tableExists('draft_operations')) {
+    initDraftOperationsTable();
+  }
 }
 
 function initChangelogTable() {
@@ -309,6 +333,137 @@ function initPolicyLogsTable() {
   `);
   db.run('CREATE INDEX IF NOT EXISTS idx_policy_logs_created ON policy_logs(created_at DESC);');
   db.run('CREATE INDEX IF NOT EXISTS idx_policy_logs_policy ON policy_logs(policy_id);');
+}
+
+function initConfigSnapshotsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS config_snapshots (
+      id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      zones_data TEXT NOT NULL,
+      policies_data TEXT NOT NULL,
+      blocklist_data TEXT NOT NULL,
+      allowlist_data TEXT NOT NULL,
+      ratelimit_data TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_snapshots_version ON config_snapshots(version);');
+}
+
+function initDraftsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS drafts (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      snapshot_id TEXT NOT NULL,
+      snapshot_version INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      last_playback_at INTEGER,
+      published_at INTEGER,
+      abandoned_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status);');
+  db.run('CREATE INDEX IF NOT EXISTS idx_drafts_snapshot ON drafts(snapshot_id);');
+}
+
+function initDraftChangesTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS draft_changes (
+      id TEXT PRIMARY KEY,
+      draft_id TEXT NOT NULL,
+      change_type TEXT NOT NULL,
+      target_id TEXT,
+      zone_id TEXT,
+      old_data TEXT,
+      new_data TEXT,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_changes_draft ON draft_changes(draft_id);');
+}
+
+function initSampleSetsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sample_sets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+}
+
+function initSamplesTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS samples (
+      id TEXT PRIMARY KEY,
+      sample_set_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'A',
+      remark TEXT,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_samples_set ON samples(sample_set_id);');
+}
+
+function initPlaybackReportsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS playback_reports (
+      id TEXT PRIMARY KEY,
+      draft_id TEXT NOT NULL,
+      sample_set_id TEXT NOT NULL,
+      total_samples INTEGER NOT NULL DEFAULT 0,
+      changed_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      blocked_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_reports_draft ON playback_reports(draft_id);');
+  db.run('CREATE INDEX IF NOT EXISTS idx_reports_created ON playback_reports(created_at DESC);');
+}
+
+function initPlaybackResultsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS playback_results (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL,
+      sample_id TEXT,
+      query_name TEXT NOT NULL,
+      query_type TEXT NOT NULL,
+      online_result TEXT,
+      draft_result TEXT,
+      status_changed INTEGER NOT NULL DEFAULT 0,
+      content_changed INTEGER NOT NULL DEFAULT 0,
+      change_type TEXT NOT NULL DEFAULT 'none',
+      rules_hit_online TEXT,
+      rules_hit_draft TEXT,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_results_report ON playback_results(report_id);');
+  db.run('CREATE INDEX IF NOT EXISTS idx_results_change_type ON playback_results(change_type);');
+}
+
+function initDraftOperationsTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS draft_operations (
+      id TEXT PRIMARY KEY,
+      draft_id TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      operator TEXT,
+      detail TEXT,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_ops_draft ON draft_operations(draft_id, created_at DESC);');
 }
 
 function addPolicy(policy) {
@@ -789,6 +944,14 @@ function initSchema() {
   initScriptExecutionsTable();
   initPoliciesTable();
   initPolicyLogsTable();
+  initConfigSnapshotsTable();
+  initDraftsTable();
+  initDraftChangesTable();
+  initSampleSetsTable();
+  initSamplesTable();
+  initPlaybackReportsTable();
+  initPlaybackResultsTable();
+  initDraftOperationsTable();
 }
 
 function beginTransaction() {
@@ -1544,6 +1707,573 @@ function updateThresholds(updates) {
   return getThresholds();
 }
 
+function createConfigSnapshot() {
+  const id = uuidv4();
+  const now = Date.now();
+
+  const lastSnapshot = queryOne('SELECT MAX(version) as max_version FROM config_snapshots');
+  const version = (lastSnapshot && lastSnapshot.max_version ? lastSnapshot.max_version : 0) + 1;
+
+  const zones = getAllZones();
+  const policies = listPolicies();
+  const blocklist = listBlocklistEntries(true);
+  const allowlist = listAllowlistEntries();
+  const ratelimit = listRatelimitRules();
+
+  run(
+    'INSERT INTO config_snapshots (id, version, zones_data, policies_data, blocklist_data, allowlist_data, ratelimit_data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [
+      id,
+      version,
+      JSON.stringify(zones),
+      JSON.stringify(policies),
+      JSON.stringify(blocklist),
+      JSON.stringify(allowlist),
+      JSON.stringify(ratelimit),
+      now,
+    ]
+  );
+  saveDatabase();
+  return getConfigSnapshotById(id);
+}
+
+function getConfigSnapshotById(id) {
+  const row = queryOne('SELECT * FROM config_snapshots WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    version: row.version,
+    zones: JSON.parse(row.zones_data),
+    policies: JSON.parse(row.policies_data),
+    blocklist: JSON.parse(row.blocklist_data),
+    allowlist: JSON.parse(row.allowlist_data),
+    ratelimit: JSON.parse(row.ratelimit_data),
+    createdAt: row.created_at,
+  };
+}
+
+function getLatestConfigSnapshot() {
+  const row = queryOne('SELECT * FROM config_snapshots ORDER BY version DESC LIMIT 1');
+  if (!row) return null;
+  return {
+    id: row.id,
+    version: row.version,
+    zones: JSON.parse(row.zones_data),
+    policies: JSON.parse(row.policies_data),
+    blocklist: JSON.parse(row.blocklist_data),
+    allowlist: JSON.parse(row.allowlist_data),
+    ratelimit: JSON.parse(row.ratelimit_data),
+    createdAt: row.created_at,
+  };
+}
+
+function getCurrentConfigVersion() {
+  const row = queryOne('SELECT MAX(version) as max_version FROM config_snapshots');
+  return row && row.max_version ? row.max_version : 0;
+}
+
+function createDraft(name, description) {
+  const id = uuidv4();
+  const now = Date.now();
+  const snapshot = createConfigSnapshot();
+
+  run(
+    'INSERT INTO drafts (id, name, description, snapshot_id, snapshot_version, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [id, name, description || null, snapshot.id, snapshot.version, 'draft', now, now]
+  );
+  saveDatabase();
+
+  addDraftOperation(id, 'create', null, `创建草稿: ${name}`);
+
+  return getDraftById(id);
+}
+
+function getDraftById(id) {
+  const row = queryOne('SELECT * FROM drafts WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    snapshotId: row.snapshot_id,
+    snapshotVersion: row.snapshot_version,
+    status: row.status,
+    lastPlaybackAt: row.last_playback_at,
+    publishedAt: row.published_at,
+    abandonedAt: row.abandoned_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function listDrafts() {
+  const rows = queryAll('SELECT * FROM drafts ORDER BY updated_at DESC');
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    snapshotId: row.snapshot_id,
+    snapshotVersion: row.snapshot_version,
+    status: row.status,
+    lastPlaybackAt: row.last_playback_at,
+    publishedAt: row.published_at,
+    abandonedAt: row.abandoned_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+function updateDraft(id, updates) {
+  const current = getDraftById(id);
+  if (!current) return null;
+  const now = Date.now();
+
+  const fields = [];
+  const params = [];
+
+  if (updates.name !== undefined) { fields.push('name = ?'); params.push(updates.name); }
+  if (updates.description !== undefined) { fields.push('description = ?'); params.push(updates.description || null); }
+
+  fields.push('updated_at = ?');
+  params.push(now);
+  params.push(id);
+
+  run(`UPDATE drafts SET ${fields.join(', ')} WHERE id = ?`, params);
+  saveDatabase();
+
+  addDraftOperation(id, 'update', null, `更新草稿信息`);
+
+  return getDraftById(id);
+}
+
+function updateDraftLastPlayback(id) {
+  const now = Date.now();
+  run('UPDATE drafts SET last_playback_at = ?, updated_at = ? WHERE id = ?', [now, now, id]);
+  saveDatabase();
+}
+
+function publishDraft(id) {
+  const now = Date.now();
+  beginTransaction();
+  try {
+    run('UPDATE drafts SET status = ?, published_at = ?, updated_at = ? WHERE id = ?', ['published', now, now, id]);
+    commitTransaction();
+  } catch (err) {
+    rollbackTransaction();
+    throw err;
+  }
+  saveDatabase();
+
+  addDraftOperation(id, 'publish', null, '发布草稿');
+
+  return getDraftById(id);
+}
+
+function abandonDraft(id) {
+  const now = Date.now();
+  run('UPDATE drafts SET status = ?, abandoned_at = ?, updated_at = ? WHERE id = ?', ['abandoned', now, now, id]);
+  saveDatabase();
+
+  addDraftOperation(id, 'abandon', null, '放弃草稿');
+
+  return getDraftById(id);
+}
+
+function addDraftChange(draftId, change) {
+  const id = uuidv4();
+  const now = Date.now();
+
+  run(
+    'INSERT INTO draft_changes (id, draft_id, change_type, target_id, zone_id, old_data, new_data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [
+      id,
+      draftId,
+      change.changeType,
+      change.targetId || null,
+      change.zoneId || null,
+      change.oldData ? JSON.stringify(change.oldData) : null,
+      change.newData ? JSON.stringify(change.newData) : null,
+      now,
+    ]
+  );
+  saveDatabase();
+
+  const draft = getDraftById(draftId);
+  if (draft) {
+    run('UPDATE drafts SET updated_at = ? WHERE id = ?', [now, draftId]);
+    saveDatabase();
+  }
+
+  addDraftOperation(draftId, 'add_change', null, `添加变更: ${change.changeType}`);
+
+  return getDraftChangeById(id);
+}
+
+function getDraftChangeById(id) {
+  const row = queryOne('SELECT * FROM draft_changes WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    draftId: row.draft_id,
+    changeType: row.change_type,
+    targetId: row.target_id,
+    zoneId: row.zone_id,
+    oldData: row.old_data ? JSON.parse(row.old_data) : null,
+    newData: row.new_data ? JSON.parse(row.new_data) : null,
+    createdAt: row.created_at,
+  };
+}
+
+function listDraftChanges(draftId) {
+  const rows = queryAll('SELECT * FROM draft_changes WHERE draft_id = ? ORDER BY created_at ASC', [draftId]);
+  return rows.map((row) => ({
+    id: row.id,
+    draftId: row.draft_id,
+    changeType: row.change_type,
+    targetId: row.target_id,
+    zoneId: row.zone_id,
+    oldData: row.old_data ? JSON.parse(row.old_data) : null,
+    newData: row.new_data ? JSON.parse(row.new_data) : null,
+    createdAt: row.created_at,
+  }));
+}
+
+function deleteDraftChange(id) {
+  const change = getDraftChangeById(id);
+  if (!change) return false;
+
+  run('DELETE FROM draft_changes WHERE id = ?', [id]);
+  saveDatabase();
+
+  addDraftOperation(change.draftId, 'delete_change', null, `删除变更: ${change.changeType}`);
+
+  return true;
+}
+
+function createSampleSet(name, description) {
+  const id = uuidv4();
+  const now = Date.now();
+
+  run(
+    'INSERT INTO sample_sets (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+    [id, name, description || null, now, now]
+  );
+  saveDatabase();
+
+  return getSampleSetById(id);
+}
+
+function getSampleSetById(id) {
+  const row = queryOne('SELECT * FROM sample_sets WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function listSampleSets() {
+  const rows = queryAll('SELECT * FROM sample_sets ORDER BY updated_at DESC');
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+function updateSampleSet(id, updates) {
+  const now = Date.now();
+  const fields = [];
+  const params = [];
+
+  if (updates.name !== undefined) { fields.push('name = ?'); params.push(updates.name); }
+  if (updates.description !== undefined) { fields.push('description = ?'); params.push(updates.description || null); }
+
+  fields.push('updated_at = ?');
+  params.push(now);
+  params.push(id);
+
+  run(`UPDATE sample_sets SET ${fields.join(', ')} WHERE id = ?`, params);
+  saveDatabase();
+
+  return getSampleSetById(id);
+}
+
+function deleteSampleSet(id) {
+  beginTransaction();
+  try {
+    run('DELETE FROM samples WHERE sample_set_id = ?', [id]);
+    run('DELETE FROM sample_sets WHERE id = ?', [id]);
+    commitTransaction();
+  } catch (err) {
+    rollbackTransaction();
+    throw err;
+  }
+  saveDatabase();
+  return true;
+}
+
+function addSample(sampleSetId, name, type, remark) {
+  const id = uuidv4();
+  const now = Date.now();
+
+  run(
+    'INSERT INTO samples (id, sample_set_id, name, type, remark, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    [id, sampleSetId, name, type || 'A', remark || null, now]
+  );
+  saveDatabase();
+
+  run('UPDATE sample_sets SET updated_at = ? WHERE id = ?', [now, sampleSetId]);
+  saveDatabase();
+
+  return getSampleById(id);
+}
+
+function getSampleById(id) {
+  const row = queryOne('SELECT * FROM samples WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    sampleSetId: row.sample_set_id,
+    name: row.name,
+    type: row.type,
+    remark: row.remark,
+    createdAt: row.created_at,
+  };
+}
+
+function listSamples(sampleSetId) {
+  const rows = queryAll('SELECT * FROM samples WHERE sample_set_id = ? ORDER BY created_at ASC', [sampleSetId]);
+  return rows.map((row) => ({
+    id: row.id,
+    sampleSetId: row.sample_set_id,
+    name: row.name,
+    type: row.type,
+    remark: row.remark,
+    createdAt: row.created_at,
+  }));
+}
+
+function updateSample(id, updates) {
+  const sample = getSampleById(id);
+  if (!sample) return null;
+
+  const now = Date.now();
+  const fields = [];
+  const params = [];
+
+  if (updates.name !== undefined) { fields.push('name = ?'); params.push(updates.name); }
+  if (updates.type !== undefined) { fields.push('type = ?'); params.push(updates.type); }
+  if (updates.remark !== undefined) { fields.push('remark = ?'); params.push(updates.remark || null); }
+
+  params.push(id);
+
+  run(`UPDATE samples SET ${fields.join(', ')} WHERE id = ?`, params);
+  saveDatabase();
+
+  run('UPDATE sample_sets SET updated_at = ? WHERE id = ?', [now, sample.sampleSetId]);
+  saveDatabase();
+
+  return getSampleById(id);
+}
+
+function deleteSample(id) {
+  const sample = getSampleById(id);
+  if (!sample) return false;
+
+  const now = Date.now();
+  run('DELETE FROM samples WHERE id = ?', [id]);
+  saveDatabase();
+
+  run('UPDATE sample_sets SET updated_at = ? WHERE id = ?', [now, sample.sampleSetId]);
+  saveDatabase();
+
+  return true;
+}
+
+function createPlaybackReport(draftId, sampleSetId, totalSamples, changedCount, failedCount, blockedCount) {
+  const id = uuidv4();
+  const now = Date.now();
+
+  run(
+    'INSERT INTO playback_reports (id, draft_id, sample_set_id, total_samples, changed_count, failed_count, blocked_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [id, draftId, sampleSetId, totalSamples, changedCount, failedCount, blockedCount, now]
+  );
+  saveDatabase();
+
+  updateDraftLastPlayback(draftId);
+  addDraftOperation(draftId, 'playback', null, `执行回放，共${totalSamples}条样本，${changedCount}条有变化`);
+
+  return getPlaybackReportById(id);
+}
+
+function getPlaybackReportById(id) {
+  const row = queryOne('SELECT * FROM playback_reports WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    draftId: row.draft_id,
+    sampleSetId: row.sample_set_id,
+    totalSamples: row.total_samples,
+    changedCount: row.changed_count,
+    failedCount: row.failed_count,
+    blockedCount: row.blocked_count,
+    createdAt: row.created_at,
+  };
+}
+
+function listPlaybackReports(draftId) {
+  let sql = 'SELECT * FROM playback_reports';
+  const params = [];
+  if (draftId) {
+    sql += ' WHERE draft_id = ?';
+    params.push(draftId);
+  }
+  sql += ' ORDER BY created_at DESC';
+  const rows = queryAll(sql, params);
+  return rows.map((row) => ({
+    id: row.id,
+    draftId: row.draft_id,
+    sampleSetId: row.sample_set_id,
+    totalSamples: row.total_samples,
+    changedCount: row.changed_count,
+    failedCount: row.failed_count,
+    blockedCount: row.blocked_count,
+    createdAt: row.created_at,
+  }));
+}
+
+function addPlaybackResult(result) {
+  const id = uuidv4();
+  const now = Date.now();
+
+  run(
+    'INSERT INTO playback_results (id, report_id, sample_id, query_name, query_type, online_result, draft_result, status_changed, content_changed, change_type, rules_hit_online, rules_hit_draft, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [
+      id,
+      result.reportId,
+      result.sampleId || null,
+      result.queryName,
+      result.queryType,
+      result.onlineResult ? JSON.stringify(result.onlineResult) : null,
+      result.draftResult ? JSON.stringify(result.draftResult) : null,
+      result.statusChanged ? 1 : 0,
+      result.contentChanged ? 1 : 0,
+      result.changeType || 'none',
+      result.rulesHitOnline ? JSON.stringify(result.rulesHitOnline) : null,
+      result.rulesHitDraft ? JSON.stringify(result.rulesHitDraft) : null,
+      now,
+    ]
+  );
+  saveDatabase();
+
+  return getPlaybackResultById(id);
+}
+
+function getPlaybackResultById(id) {
+  const row = queryOne('SELECT * FROM playback_results WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    reportId: row.report_id,
+    sampleId: row.sample_id,
+    queryName: row.query_name,
+    queryType: row.query_type,
+    onlineResult: row.online_result ? JSON.parse(row.online_result) : null,
+    draftResult: row.draft_result ? JSON.parse(row.draft_result) : null,
+    statusChanged: row.status_changed === 1,
+    contentChanged: row.content_changed === 1,
+    changeType: row.change_type,
+    rulesHitOnline: row.rules_hit_online ? JSON.parse(row.rules_hit_online) : null,
+    rulesHitDraft: row.rules_hit_draft ? JSON.parse(row.rules_hit_draft) : null,
+    createdAt: row.created_at,
+  };
+}
+
+function listPlaybackResults(reportId, filters = {}) {
+  let sql = 'SELECT * FROM playback_results WHERE report_id = ?';
+  const params = [reportId];
+
+  if (filters.changeType) {
+    sql += ' AND change_type = ?';
+    params.push(filters.changeType);
+  }
+  if (filters.changedOnly) {
+    sql += ' AND (status_changed = 1 OR content_changed = 1)';
+  }
+  if (filters.failedOnly) {
+    sql += ' AND (online_result LIKE ? OR draft_result LIKE ?)';
+    params.push('%NXDOMAIN%', '%REFUSED%');
+  }
+  if (filters.blockedOnly) {
+    sql += " AND (change_type IN ('to_refused', 'to_ratelimited', 'to_nxdomain'))";
+  }
+
+  sql += ' ORDER BY created_at ASC';
+
+  const rows = queryAll(sql, params);
+  return rows.map((row) => ({
+    id: row.id,
+    reportId: row.report_id,
+    sampleId: row.sample_id,
+    queryName: row.query_name,
+    queryType: row.query_type,
+    onlineResult: row.online_result ? JSON.parse(row.online_result) : null,
+    draftResult: row.draft_result ? JSON.parse(row.draft_result) : null,
+    statusChanged: row.status_changed === 1,
+    contentChanged: row.content_changed === 1,
+    changeType: row.change_type,
+    rulesHitOnline: row.rules_hit_online ? JSON.parse(row.rules_hit_online) : null,
+    rulesHitDraft: row.rules_hit_draft ? JSON.parse(row.rules_hit_draft) : null,
+    createdAt: row.created_at,
+  }));
+}
+
+function getPlaybackSummary(reportId) {
+  const rows = queryAll(
+    'SELECT change_type, COUNT(*) as cnt FROM playback_results WHERE report_id = ? GROUP BY change_type',
+    [reportId]
+  );
+  const summary = {};
+  for (const row of rows) {
+    summary[row.change_type] = row.cnt;
+  }
+  return summary;
+}
+
+function addDraftOperation(draftId, operation, operator, detail) {
+  const id = uuidv4();
+  const now = Date.now();
+
+  run(
+    'INSERT INTO draft_operations (id, draft_id, operation, operator, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    [id, draftId, operation, operator || null, detail || null, now]
+  );
+  saveDatabase();
+
+  return id;
+}
+
+function listDraftOperations(draftId, limit = 50) {
+  const rows = queryAll(
+    'SELECT * FROM draft_operations WHERE draft_id = ? ORDER BY created_at DESC LIMIT ?',
+    [draftId, limit]
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    draftId: row.draft_id,
+    operation: row.operation,
+    operator: row.operator,
+    detail: row.detail,
+    createdAt: row.created_at,
+  }));
+}
+
 module.exports = {
   initDatabase,
   createZone,
@@ -1617,4 +2347,37 @@ module.exports = {
   listPolicyLogs,
   getPolicyStats,
   trimPolicyLogs,
+  createConfigSnapshot,
+  getConfigSnapshotById,
+  getLatestConfigSnapshot,
+  getCurrentConfigVersion,
+  createDraft,
+  getDraftById,
+  listDrafts,
+  updateDraft,
+  publishDraft,
+  abandonDraft,
+  addDraftChange,
+  getDraftChangeById,
+  listDraftChanges,
+  deleteDraftChange,
+  createSampleSet,
+  getSampleSetById,
+  listSampleSets,
+  updateSampleSet,
+  deleteSampleSet,
+  addSample,
+  getSampleById,
+  listSamples,
+  updateSample,
+  deleteSample,
+  createPlaybackReport,
+  getPlaybackReportById,
+  listPlaybackReports,
+  addPlaybackResult,
+  getPlaybackResultById,
+  listPlaybackResults,
+  getPlaybackSummary,
+  addDraftOperation,
+  listDraftOperations,
 };

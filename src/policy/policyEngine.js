@@ -310,4 +310,6 @@ module.exports = {
   matchPolicy,
   isIpInCidr,
   matchIpRange,
+  executeRewrite,
+  executeNxdomain,
 };

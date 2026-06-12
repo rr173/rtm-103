@@ -22,6 +22,7 @@ const createEnforcementRouter = require('./routes/enforcement');
 const createProtocolRouter = require('./routes/protocol');
 const createSandboxRouter = require('./routes/sandbox');
 const createPoliciesRouter = require('./routes/policies');
+const createPreviewRouter = require('./routes/preview');
 
 const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) {
@@ -205,6 +206,118 @@ function seedPolicyData() {
   console.log('    -> 强制返回NXDOMAIN');
 }
 
+function seedPreviewData() {
+  console.log('[Seed] Injecting preview demo data...');
+
+  const existingSampleSets = db.listSampleSets();
+  const demoSampleSetName = '常用查询样本集';
+  let sampleSet = existingSampleSets.find((s) => s.name === demoSampleSetName);
+
+  if (!sampleSet) {
+    sampleSet = db.createSampleSet(
+      demoSampleSetName,
+      '包含日常运维常用的域名查询样本，用于变更预演验证'
+    );
+
+    const demoSamples = [
+      { name: 'www.example.com', type: 'A', remark: '主站A记录' },
+      { name: 'example.com', type: 'NS', remark: '域名服务器记录' },
+      { name: 'example.com', type: 'MX', remark: '邮件交换记录' },
+      { name: 'mail.example.com', type: 'A', remark: '邮件服务器' },
+      { name: 'api.example.com', type: 'A', remark: 'API服务地址' },
+      { name: 'app.internal.example.com', type: 'A', remark: '内部应用，受策略管控' },
+      { name: 'private-resource.example.com', type: 'A', remark: '私有资源，会被重定向' },
+      { name: 'evil-redirect.example.com', type: 'A', remark: '测试NXDOMAIN策略' },
+      { name: 'www.mysite.com', type: 'A', remark: '另一个站点' },
+      { name: 'nonexistent.example.com', type: 'A', remark: '不存在的域名，测试NXDOMAIN' },
+      { name: 'cdn.provider.net', type: 'A', remark: 'CDN提供商' },
+      { name: 'test.evil.com', type: 'A', remark: '测试黑名单拦截' },
+    ];
+
+    for (const s of demoSamples) {
+      db.addSample(sampleSet.id, s.name, s.type, s.remark);
+    }
+    console.log('[Seed] Demo sample set created with 12 samples.');
+  }
+
+  const existingDrafts = db.listDrafts();
+  const demoDraftName = '演示：调整example.com解析配置';
+  let demoDraft = existingDrafts.find((d) => d.name === demoDraftName);
+
+  if (!demoDraft) {
+    demoDraft = db.createDraft(
+      demoDraftName,
+      '这是一个演示草稿，包含多项配置变更，用于展示预演回放功能的效果'
+    );
+
+    const zones = db.getAllZones();
+    const exampleZone = zones.find((z) => z.name === 'example.com');
+
+    if (exampleZone) {
+      const wwwRecord = exampleZone.records.find(
+        (r) => r.name === 'www.example.com' && r.type === 'A'
+      );
+      const apiRecord = exampleZone.records.find(
+        (r) => r.name === 'api.example.com' && r.type === 'A'
+      );
+
+      if (wwwRecord) {
+        db.addDraftChange(demoDraft.id, {
+          changeType: 'record_modify',
+          targetId: wwwRecord.id,
+          zoneId: exampleZone.id,
+          oldData: { name: wwwRecord.name, type: wwwRecord.type, value: wwwRecord.value, ttl: wwwRecord.ttl },
+          newData: { name: wwwRecord.name, type: wwwRecord.type, value: '203.0.113.80', ttl: wwwRecord.ttl },
+        });
+      }
+
+      db.addDraftChange(demoDraft.id, {
+        changeType: 'record_add',
+        zoneId: exampleZone.id,
+        newData: { name: 'preview.example.com', type: 'A', value: '203.0.113.200', ttl: 3600 },
+      });
+
+      if (apiRecord) {
+        db.addDraftChange(demoDraft.id, {
+          changeType: 'record_delete',
+          targetId: apiRecord.id,
+          zoneId: exampleZone.id,
+          oldData: { name: apiRecord.name, type: apiRecord.type, value: apiRecord.value, ttl: apiRecord.ttl },
+        });
+      }
+    }
+
+    db.addDraftChange(demoDraft.id, {
+      changeType: 'policy_add',
+      newData: {
+        name: 'preview-block-test-domain',
+        description: '预演测试：阻断test-preview.example.com',
+        priority: 5,
+        enabled: true,
+        domainPattern: 'test-preview.example.com',
+        recordType: 'A',
+        timeWindow: null,
+        responseRegex: null,
+        action: 'nxdomain',
+        actionParams: null,
+      },
+    });
+
+    db.addDraftChange(demoDraft.id, {
+      changeType: 'blocklist_add',
+      newData: {
+        pattern: '*.suspicious-example.com',
+        reason: '预演测试：临时拦截可疑域名',
+        expireMinutes: 0,
+      },
+    });
+
+    console.log('[Seed] Demo draft created with 5 changes.');
+  }
+
+  console.log('[Seed] Preview demo data injected.');
+}
+
 function seedSandboxData() {
   console.log('[Seed] Injecting sandbox demo scripts...');
 
@@ -362,6 +475,19 @@ async function bootstrap() {
   app.use('/api', createProtocolRouter(dnsServer));
   app.use('/api', createSandboxRouter(sandbox));
   app.use('/api', createPoliciesRouter(policyEngine));
+  app.use('/api/preview', createPreviewRouter());
+
+  const frontendDist = path.join(__dirname, '..', 'frontend', 'dist');
+  if (fs.existsSync(frontendDist)) {
+    console.log('[Server] Serving static files from frontend/dist');
+    app.use(express.static(frontendDist));
+    app.get('*', (_req, res, next) => {
+      if (_req.path.startsWith('/api/')) {
+        return next();
+      }
+      res.sendFile(path.join(frontendDist, 'index.html'));
+    });
+  }
 
   app.use((err, _req, res, _next) => {
     console.error('Unhandled error:', err);
@@ -373,8 +499,15 @@ async function bootstrap() {
   seedEnforcementData();
   seedSandboxData();
   seedPolicyData();
+  seedPreviewData();
 
-  await dnsServer.start();
+  try {
+    await dnsServer.start();
+  } catch (dnsErr) {
+    console.warn('[DNS] DNS server failed to start (port may be in use). DNS protocol will be unavailable.');
+    console.warn('[DNS] Error:', dnsErr.message);
+    dnsServer.port = 5353;
+  }
 
   app.listen(PORT, () => {
     console.log('');
@@ -461,6 +594,22 @@ async function bootstrap() {
     console.log('║   POST   /api/policies/reorder                                  ║');
     console.log('║   GET    /api/policies/logs?limit=50                            ║');
     console.log('║   GET    /api/policies/stats                                    ║');
+    console.log('╠════════════════════════════════════════════════════════════════╣');
+    console.log('║   Preview Workbench:                                             ║');
+    console.log('║   GET    /api/preview/drafts                                    ║');
+    console.log('║   POST   /api/preview/drafts                                    ║');
+    console.log('║   GET    /api/preview/drafts/:id                                ║');
+    console.log('║   PUT    /api/preview/drafts/:id                                ║');
+    console.log('║   POST   /api/preview/drafts/:id/changes                        ║');
+    console.log('║   DELETE /api/preview/drafts/:id/changes/:changeId             ║');
+    console.log('║   POST   /api/preview/drafts/:id/playback                       ║');
+    console.log('║   POST   /api/preview/drafts/:id/publish                        ║');
+    console.log('║   POST   /api/preview/drafts/:id/abandon                        ║');
+    console.log('║   GET    /api/preview/sample-sets                               ║');
+    console.log('║   POST   /api/preview/sample-sets                               ║');
+    console.log('║   GET    /api/preview/sample-sets/:id                           ║');
+    console.log('║   GET    /api/preview/reports/:id                               ║');
+    console.log('║   GET    /api/preview/reports/:id/results                       ║');
     console.log('╚════════════════════════════════════════════════════════════════╝');
     console.log('');
   });
