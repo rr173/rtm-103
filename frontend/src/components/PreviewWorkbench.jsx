@@ -468,7 +468,7 @@ export default function PreviewWorkbench() {
   const filteredResults = reportResults.filter((r) => {
     if (filterChangedOnly && !r.statusChanged && !r.contentChanged) return false;
     if (filterFailedOnly && r.draftResult.status !== 'NXDOMAIN' && r.draftResult.status !== 'REFUSED' && r.draftResult.status !== 'SERVFAIL') return false;
-    if (filterBlockedOnly && !['to_refused', 'to_ratelimited', 'to_nxdomain'].includes(r.changeType)) return false;
+    if (filterBlockedOnly && r.draftResult.status !== 'REFUSED' && r.draftResult.status !== 'RATE_LIMITED') return false;
     return true;
   });
 

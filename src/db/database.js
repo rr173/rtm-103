@@ -121,6 +121,9 @@ function migrateSchema() {
   if (!tableExists('config_snapshots')) {
     initConfigSnapshotsTable();
   }
+  if (!tableExists('config_version')) {
+    initConfigVersionTable();
+  }
   if (!tableExists('drafts')) {
     initDraftsTable();
   }
@@ -351,6 +354,28 @@ function initConfigSnapshotsTable() {
   db.run('CREATE INDEX IF NOT EXISTS idx_snapshots_version ON config_snapshots(version);');
 }
 
+function initConfigVersionTable() {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS config_version (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      version INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  const row = queryOne('SELECT version FROM config_version WHERE id = 1');
+  if (!row) {
+    run('INSERT INTO config_version (id, version) VALUES (1, 0)');
+  }
+}
+
+function incrementConfigVersion() {
+  run('UPDATE config_version SET version = version + 1 WHERE id = 1');
+}
+
+function getCurrentConfigVersion() {
+  const row = queryOne('SELECT version FROM config_version WHERE id = 1');
+  return row ? row.version : 0;
+}
+
 function initDraftsTable() {
   db.run(`
     CREATE TABLE IF NOT EXISTS drafts (
@@ -487,6 +512,7 @@ function addPolicy(policy) {
       now,
     ]
   );
+  incrementConfigVersion();
   saveDatabase();
   return getPolicyById(id);
 }
@@ -558,12 +584,14 @@ function updatePolicy(id, updates) {
   params.push(id);
 
   run(`UPDATE policies SET ${fields.join(', ')} WHERE id = ?`, params);
+  incrementConfigVersion();
   saveDatabase();
   return getPolicyById(id);
 }
 
 function deletePolicy(id) {
   run('DELETE FROM policies WHERE id = ?', [id]);
+  incrementConfigVersion();
   saveDatabase();
 }
 
@@ -584,6 +612,7 @@ function reorderPolicies(policyIds) {
     rollbackTransaction();
     throw err;
   }
+  incrementConfigVersion();
   saveDatabase();
   return listPolicies();
 }
@@ -665,6 +694,7 @@ function addBlocklistEntry(pattern, reason, expireMinutes) {
     'INSERT INTO blocklist (id, pattern, reason, expire_minutes, created_at) VALUES (?, ?, ?, ?, ?)',
     [id, pattern, reason || null, expireMinutes || 0, now]
   );
+  incrementConfigVersion();
   saveDatabase();
   return getBlocklistEntryById(id);
 }
@@ -686,6 +716,7 @@ function listBlocklistEntries(includeExpired = false) {
 
 function deleteBlocklistEntry(id) {
   run('DELETE FROM blocklist WHERE id = ?', [id]);
+  incrementConfigVersion();
   saveDatabase();
 }
 
@@ -696,6 +727,7 @@ function addAllowlistEntry(pattern) {
     'INSERT INTO allowlist (id, pattern, created_at) VALUES (?, ?, ?)',
     [id, pattern, now]
   );
+  incrementConfigVersion();
   saveDatabase();
   return getAllowlistEntryById(id);
 }
@@ -710,6 +742,7 @@ function listAllowlistEntries() {
 
 function deleteAllowlistEntry(id) {
   run('DELETE FROM allowlist WHERE id = ?', [id]);
+  incrementConfigVersion();
   saveDatabase();
 }
 
@@ -720,6 +753,7 @@ function addRatelimitRule(pattern, maxRequests, windowSeconds = 60) {
     'INSERT INTO ratelimit_rules (id, pattern, max_requests, window_seconds, created_at) VALUES (?, ?, ?, ?, ?)',
     [id, pattern, maxRequests, windowSeconds, now]
   );
+  incrementConfigVersion();
   saveDatabase();
   return getRatelimitRuleById(id);
 }
@@ -742,12 +776,14 @@ function updateRatelimitRule(id, updates) {
     'UPDATE ratelimit_rules SET pattern = ?, max_requests = ?, window_seconds = ? WHERE id = ?',
     [pattern, maxRequests, windowSeconds, id]
   );
+  incrementConfigVersion();
   saveDatabase();
   return getRatelimitRuleById(id);
 }
 
 function deleteRatelimitRule(id) {
   run('DELETE FROM ratelimit_rules WHERE id = ?', [id]);
+  incrementConfigVersion();
   saveDatabase();
 }
 
@@ -945,6 +981,7 @@ function initSchema() {
   initPoliciesTable();
   initPolicyLogsTable();
   initConfigSnapshotsTable();
+  initConfigVersionTable();
   initDraftsTable();
   initDraftChangesTable();
   initSampleSetsTable();
@@ -1056,6 +1093,7 @@ function createZone(name, parentId, nsRecords) {
     throw err;
   }
 
+  incrementConfigVersion();
   saveDatabase();
   return getZoneById(id);
 }
@@ -1090,6 +1128,7 @@ function deleteZone(id) {
     rollbackTransaction();
     throw err;
   }
+  incrementConfigVersion();
   saveDatabase();
 }
 
@@ -1125,6 +1164,7 @@ function addRecord(zoneId, name, type, value, ttl) {
     throw err;
   }
 
+  incrementConfigVersion();
   saveDatabase();
   return getRecordById(id);
 }
@@ -1185,6 +1225,7 @@ function updateRecord(zoneId, recordId, updates) {
     throw err;
   }
 
+  incrementConfigVersion();
   saveDatabase();
   return getRecordById(recordId);
 }
@@ -1221,6 +1262,7 @@ function deleteRecord(zoneId, recordId) {
     throw err;
   }
 
+  incrementConfigVersion();
   saveDatabase();
   return true;
 }
@@ -1767,19 +1809,15 @@ function getLatestConfigSnapshot() {
   };
 }
 
-function getCurrentConfigVersion() {
-  const row = queryOne('SELECT MAX(version) as max_version FROM config_snapshots');
-  return row && row.max_version ? row.max_version : 0;
-}
-
 function createDraft(name, description) {
   const id = uuidv4();
   const now = Date.now();
   const snapshot = createConfigSnapshot();
+  const configVersion = getCurrentConfigVersion();
 
   run(
     'INSERT INTO drafts (id, name, description, snapshot_id, snapshot_version, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [id, name, description || null, snapshot.id, snapshot.version, 'draft', now, now]
+    [id, name, description || null, snapshot.id, configVersion, 'draft', now, now]
   );
   saveDatabase();
 
@@ -1857,6 +1895,7 @@ function publishDraft(id) {
   beginTransaction();
   try {
     run('UPDATE drafts SET status = ?, published_at = ?, updated_at = ? WHERE id = ?', ['published', now, now, id]);
+    incrementConfigVersion();
     commitTransaction();
   } catch (err) {
     rollbackTransaction();
@@ -2211,7 +2250,7 @@ function listPlaybackResults(reportId, filters = {}) {
     params.push('%NXDOMAIN%', '%REFUSED%');
   }
   if (filters.blockedOnly) {
-    sql += " AND (change_type IN ('to_refused', 'to_ratelimited', 'to_nxdomain'))";
+    sql += " AND (draft_result LIKE '%REFUSED%' OR draft_result LIKE '%RATE_LIMITED%')";
   }
 
   sql += ' ORDER BY created_at ASC';
